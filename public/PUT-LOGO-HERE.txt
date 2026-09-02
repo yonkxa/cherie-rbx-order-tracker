@@ -1,0 +1,5 @@
+Put your logo here as exactly:
+
+public/logo.png
+
+The same logo.png is used throughout the app and as the browser/site icon.
