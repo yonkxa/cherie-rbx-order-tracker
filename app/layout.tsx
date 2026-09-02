@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Chérie",
+  title: "Chérie — RBX Order Tracker",
   description: "Private shared Roblox gamepass order tracker for Chérie.",
   icons: {
     icon: "/logo.png",
