@@ -691,3 +691,18 @@ end;
 $$;
 
 grant execute on function public.archive_selected_records(uuid[], uuid[]) to authenticated;
+
+
+-- Chérie RBX Order Desk
+-- Adds a simple "buyer source" choice (Telegram or Discord) to orders and payouts.
+-- Safe to run multiple times.
+
+alter table public.orders
+  add column if not exists buyer_source text not null default 'telegram'
+  check (buyer_source in ('telegram', 'discord'));
+
+alter table public.robux_payouts
+  add column if not exists buyer_source text not null default 'telegram'
+  check (buyer_source in ('telegram', 'discord'));
+
+-- (No RLS changes needed — existing staff policies already cover these tables.)
