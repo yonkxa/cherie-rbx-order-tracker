@@ -39,8 +39,8 @@ type GamepassLink = { amount: number; link: string };
 
 type ArchiveRecord = { id: string; source_id: string; record_type: "gamepass" | "payout"; archived_period_start: string; archived_at: string; data: GamepassOrder | RobuxPayout; created_by_email: string | null; updated_by_email: string | null; };
 type StaffRole = "owner" | "admin";
-const OWNER_EMAIL = process.env.NEXT_PUBLIC_OWNER_EMAIL?.toLowerCase() ?? "";
-const ADMIN_EMAIL = process.env.NEXT_PUBLIC_ADMIN_EMAIL?.toLowerCase() ?? "";
+const OWNER_EMAIL = "espantaleonnika6@gmail.com";
+const ADMIN_EMAIL = "nicslibunao@gmail.com";
 const STAFF: Record<string, StaffRole> = { [OWNER_EMAIL]: "owner", [ADMIN_EMAIL]: "admin" };
 function staffLabel(email: string | null | undefined) {
   if (!email) return "System";
@@ -350,7 +350,7 @@ export default function Home() {
     }
     alt={currentRole === "owner" ? "Owner" : "Admin"}
   />
-</span><span className="account-email">{currentRole === "owner" ? "Owner" : "Admin"}</span><ChevronDown size={14} /></button>
+</span><span className="account-email">{currentRole === "owner" ? "Owner" : currentRole === "admin" ? "Admin" : "Unauthorized"}</span><ChevronDown size={14} /></button>
         </div>
       </header>
 
@@ -623,7 +623,7 @@ function SettingsView({ session, role, darkMode, setDarkMode, onRefresh, onSignO
 
   <div className="current-role">
     <span>Signed in as</span>
-    <b>{role === "owner" ? "Owner" : "Admin"}</b>
+    <b>{role === "owner" ? "Owner" : role === "admin" ? "Admin" : "Unauthorized"}</b>
   </div>
 </div></section><section className="settings-card"><div className="settings-card-head"><div className="settings-icon"><RefreshCw size={17} /></div><div><strong>Workspace actions</strong><span>Useful controls for shared records.</span></div></div><button className="settings-action" onClick={onRefresh}><span><RefreshCw size={16} /><b>Refresh records</b></span><ArrowUpRight size={15} /></button><button className="settings-action danger" onClick={onSignOut}><span><LogOut size={16} /><b>Sign out</b></span><ArrowUpRight size={15} /></button></section><section className="settings-card"><div className="settings-card-head"><div className="settings-icon"><Settings size={17} /></div><div><strong>Workspace</strong><span>Current application information.</span></div></div><div className="info-list"><div><span>Workspace</span><b>Chérie RBX Order Desk</b></div><div><span>Access</span><b>Private staff workspace</b></div><div><span>Data</span><b>Shared through Supabase</b></div></div></section></div></div>;
 }
