@@ -4,10 +4,12 @@ import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "reac
 import { createPortal } from "react-dom";
 import type { Session } from "@supabase/supabase-js";
 import {
+  Archive,
   ArrowUpRight,
   Check,
   ChevronDown,
   CircleDollarSign,
+  CalendarDays,
   ExternalLink,
   Gamepad2,
   Link2,
@@ -19,10 +21,12 @@ import {
   RefreshCw,
   Search,
   Settings,
+  ShieldCheck,
   Sun,
   Users,
   WalletCards,
   X,
+  Trash2,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 
@@ -30,18 +34,29 @@ type OrderStatus = "pending" | "processing" | "completed" | "refunded";
 type ProcessType = "fast" | "slow";
 type PayoutStatus = OrderStatus;
 type SourceGroup = "A (supp)" | "A (d'isle)" | "B (supp)" | "C (supp)" | "D (supp)" | "E (supp)";
-type View = "overview" | "gamepasses" | "payouts" | "settings";
+type View = "overview" | "gamepasses" | "payouts" | "archive" | "settings";
 type GamepassLink = { amount: number; link: string };
+
+type ArchiveRecord = { id: string; source_id: string; record_type: "gamepass" | "payout"; archived_period_start: string; archived_at: string; data: GamepassOrder | RobuxPayout; created_by_email: string | null; updated_by_email: string | null; };
+type StaffRole = "owner" | "admin";
+const OWNER_EMAIL = process.env.NEXT_PUBLIC_OWNER_EMAIL?.toLowerCase() ?? "";
+const ADMIN_EMAIL = process.env.NEXT_PUBLIC_ADMIN_EMAIL?.toLowerCase() ?? "";
+const STAFF: Record<string, StaffRole> = { [OWNER_EMAIL]: "owner", [ADMIN_EMAIL]: "admin" };
+function staffLabel(email: string | null | undefined) {
+  if (!email) return "System";
+  const role = STAFF[email.toLowerCase()];
+  return role === "owner" ? "Owner" : role === "admin" ? "Admin" : "System";
+}
 
 type GamepassOrder = {
   id: string; robux_amount: number; process_type: ProcessType; gamepass_link: string;
   gamepass_links: GamepassLink[] | null; buyer_username: string; status: OrderStatus;
-  notes: string | null; created_by: string | null; completed_at: string | null; created_at: string; updated_at: string;
+  notes: string | null; created_by: string | null; created_by_email: string | null; updated_by: string | null; updated_by_email: string | null; completed_at: string | null; created_at: string; updated_at: string;
 };
 
 type RobuxPayout = {
   id: string; buyer_username: string; roblox_username: string; robux_amount: number; source_group: SourceGroup;
-  status: PayoutStatus; notes: string | null; created_by: string | null; completed_at: string | null; created_at: string; updated_at: string;
+  status: PayoutStatus; notes: string | null; created_by: string | null; created_by_email: string | null; updated_by: string | null; updated_by_email: string | null; completed_at: string | null; created_at: string; updated_at: string;
 };
 
 type DropdownOption = { value: string; label: string; hint?: string };
@@ -69,6 +84,7 @@ export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
   const [gamepasses, setGamepasses] = useState<GamepassOrder[]>([]);
   const [payouts, setPayouts] = useState<RobuxPayout[]>([]);
+  const [archives, setArchives] = useState<ArchiveRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [view, setView] = useState<View>("overview");
@@ -76,10 +92,18 @@ export default function Home() {
   const [statusFilter, setStatusFilter] = useState<"all" | OrderStatus>("all");
   const [processFilter, setProcessFilter] = useState<"all" | ProcessType>("all");
   const [groupFilter, setGroupFilter] = useState<"all" | SourceGroup>("all");
+  const [archivePeriod, setArchivePeriod] = useState<"month" | "week" | "year" | "all">("month");
+  const [archiveDate, setArchiveDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [showGamepassModal, setShowGamepassModal] = useState(false);
   const [showPayoutModal, setShowPayoutModal] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [selectedGamepasses, setSelectedGamepasses] = useState<Set<string>>(new Set());
+  const [selectedPayouts, setSelectedPayouts] = useState<Set<string>>(new Set());
+  const [selectedArchives, setSelectedArchives] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState<{ title: string; message: string; confirmLabel: string; danger: boolean; action: () => Promise<void> } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -108,18 +132,20 @@ export default function Home() {
   }, [darkMode]);
 
   useEffect(() => {
-    document.body.classList.toggle("modal-open", showGamepassModal || showPayoutModal);
+    document.body.classList.toggle("modal-open", showGamepassModal || showPayoutModal || !!confirmDialog);
     return () => document.body.classList.remove("modal-open");
-  }, [showGamepassModal, showPayoutModal]);
+  }, [showGamepassModal, showPayoutModal, confirmDialog]);
 
   async function loadAll() {
     setLoading(true);
-    const [ordersResult, payoutsResult] = await Promise.all([
+    const [ordersResult, payoutsResult, archiveResult] = await Promise.all([
       supabase.from("orders").select("*").order("created_at", { ascending: false }),
       supabase.from("robux_payouts").select("*").order("created_at", { ascending: false }),
+      supabase.from("archive_records").select("*").order("archived_period_start", { ascending: false }).order("created_at", { ascending: false }),
     ]);
     if (ordersResult.error) setMessage(ordersResult.error.message); else setGamepasses((ordersResult.data ?? []) as GamepassOrder[]);
     if (payoutsResult.error) setMessage(payoutsResult.error.message); else setPayouts((payoutsResult.data ?? []) as RobuxPayout[]);
+    if (archiveResult.error) setMessage(archiveResult.error.message); else setArchives((archiveResult.data ?? []) as ArchiveRecord[]);
     setLoading(false);
   }
 
@@ -129,7 +155,7 @@ export default function Home() {
     if (error) setMessage(friendlyAuthError(error.message));
   }
   async function logout() { await supabase.auth.signOut(); setView("overview"); }
-  function go(viewName: View) { setView(viewName); setMobileNavOpen(false); setSearch(""); }
+  function go(viewName: View) { setView(viewName); setMobileNavOpen(false); setSearch(""); setSelectedGamepasses(new Set()); setSelectedPayouts(new Set()); setSelectedArchives(new Set()); }
   function resetGamepassForm() { setGamepassForm({ buyer_username: "", robux_amount: "", process_type: "slow", status: "pending", notes: "" }); setGamepassLinks([{ amount: 0, link: "" }]); }
   function resetPayoutForm() { setPayoutForm({ buyer_username: "", roblox_username: "", robux_amount: "", source_group: "A (supp)", status: "pending", notes: "" }); }
   function openGamepassModal() { resetGamepassForm(); setMessage(""); setShowGamepassModal(true); }
@@ -151,7 +177,7 @@ export default function Home() {
     if (links.some(item => !item.link)) return setMessage("Add a link for every gamepass.");
     if (links.some(item => !/^https?:\/\//i.test(item.link))) return setMessage("Each gamepass link must start with http:// or https://.");
     if (splitTotal !== amount) return setMessage(`The gamepass split totals ${money(splitTotal)}, but the order is ${money(amount)}.`);
-    const { error } = await supabase.from("orders").insert({ robux_amount: amount, process_type: gamepassForm.process_type, gamepass_link: links[0].link, gamepass_links: links, buyer_username: cleanUsername(gamepassForm.buyer_username), status: gamepassForm.status, notes: gamepassForm.notes.trim() || null, created_by: session?.user.id });
+    const { error } = await supabase.from("orders").insert({ robux_amount: amount, process_type: gamepassForm.process_type, gamepass_link: links[0].link, gamepass_links: links, buyer_username: cleanUsername(gamepassForm.buyer_username), status: gamepassForm.status, notes: gamepassForm.notes.trim() || null });
     if (error) return setMessage(error.message);
     setShowGamepassModal(false); await loadAll();
   }
@@ -162,7 +188,7 @@ export default function Home() {
     if (!amount || amount <= 0) return setMessage("Enter a valid Robux amount.");
     if (!payoutForm.buyer_username.trim()) return setMessage("Add the buyer username.");
     if (!payoutForm.roblox_username.trim()) return setMessage("Add the Roblox recipient username.");
-    const { error } = await supabase.from("robux_payouts").insert({ buyer_username: cleanUsername(payoutForm.buyer_username), roblox_username: cleanUsername(payoutForm.roblox_username), robux_amount: amount, source_group: payoutForm.source_group, status: payoutForm.status, notes: payoutForm.notes.trim() || null, created_by: session?.user.id });
+    const { error } = await supabase.from("robux_payouts").insert({ buyer_username: cleanUsername(payoutForm.buyer_username), roblox_username: cleanUsername(payoutForm.roblox_username), robux_amount: amount, source_group: payoutForm.source_group, status: payoutForm.status, notes: payoutForm.notes.trim() || null });
     if (error) return setMessage(error.message);
     setShowPayoutModal(false); await loadAll();
   }
@@ -175,6 +201,79 @@ export default function Home() {
     const { error } = await supabase.from("robux_payouts").update({ status, completed_at: status === "completed" ? new Date().toISOString() : null }).eq("id", id);
     if (error) setMessage(error.message); else await loadAll();
   }
+
+  function toggleGamepassSelected(id: string) {
+    setSelectedGamepasses(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  }
+  function toggleAllGamepasses(ids: string[], checked: boolean) {
+    setSelectedGamepasses(prev => { const next = new Set(prev); ids.forEach(id => checked ? next.add(id) : next.delete(id)); return next; });
+  }
+  function togglePayoutSelected(id: string) {
+    setSelectedPayouts(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  }
+  function toggleAllPayouts(ids: string[], checked: boolean) {
+    setSelectedPayouts(prev => { const next = new Set(prev); ids.forEach(id => checked ? next.add(id) : next.delete(id)); return next; });
+  }
+
+  function requestConfirm(opts: { title: string; message: string; confirmLabel: string; danger?: boolean; action: () => Promise<void> }) {
+    setConfirmDialog({ danger: false, ...opts });
+  }
+  async function runConfirmDialog() {
+    if (!confirmDialog) return;
+    setConfirmBusy(true);
+    await confirmDialog.action();
+    setConfirmBusy(false);
+    setConfirmDialog(null);
+  }
+
+  async function archiveSelectedGamepasses() {
+    if (selectedGamepasses.size === 0) return;
+    setBulkBusy(true); setMessage("");
+    const { error } = await supabase.rpc("archive_selected_records", { p_gamepass_ids: Array.from(selectedGamepasses), p_payout_ids: [] });
+    setBulkBusy(false);
+    if (error) return setMessage(error.message);
+    setSelectedGamepasses(new Set()); await loadAll();
+  }
+  async function deleteSelectedGamepasses() {
+    if (selectedGamepasses.size === 0) return;
+    setBulkBusy(true); setMessage("");
+    const { error } = await supabase.from("orders").delete().in("id", Array.from(selectedGamepasses));
+    setBulkBusy(false);
+    if (error) return setMessage(error.message);
+    setSelectedGamepasses(new Set()); await loadAll();
+  }
+  async function archiveSelectedPayouts() {
+    if (selectedPayouts.size === 0) return;
+    setBulkBusy(true); setMessage("");
+    const { error } = await supabase.rpc("archive_selected_records", { p_gamepass_ids: [], p_payout_ids: Array.from(selectedPayouts) });
+    setBulkBusy(false);
+    if (error) return setMessage(error.message);
+    setSelectedPayouts(new Set()); await loadAll();
+  }
+  async function deleteSelectedPayouts() {
+    if (selectedPayouts.size === 0) return;
+    setBulkBusy(true); setMessage("");
+    const { error } = await supabase.from("robux_payouts").delete().in("id", Array.from(selectedPayouts));
+    setBulkBusy(false);
+    if (error) return setMessage(error.message);
+    setSelectedPayouts(new Set()); await loadAll();
+  }
+
+  function toggleArchiveSelected(id: string) {
+    setSelectedArchives(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  }
+  function toggleAllArchives(ids: string[], checked: boolean) {
+    setSelectedArchives(prev => { const next = new Set(prev); ids.forEach(id => checked ? next.add(id) : next.delete(id)); return next; });
+  }
+  async function deleteSelectedArchives() {
+    if (currentRole !== "owner" || selectedArchives.size === 0) return;
+    setBulkBusy(true); setMessage("");
+    const { error } = await supabase.from("archive_records").delete().in("id", Array.from(selectedArchives));
+    setBulkBusy(false);
+    if (error) return setMessage(error.message);
+    setSelectedArchives(new Set()); await loadAll();
+  }
+
 
   const pendingGamepasses = gamepasses.filter(o => o.status === "pending").reduce((s, o) => s + o.robux_amount, 0);
   const processingGamepasses = gamepasses.filter(o => o.status === "processing").reduce((s, o) => s + o.robux_amount, 0);
@@ -199,9 +298,36 @@ export default function Home() {
     });
   }, [payouts, search, statusFilter, groupFilter]);
 
+  const currentEmail = session?.user.email?.toLowerCase() ?? "";
+  const currentRole = STAFF[currentEmail];
+  const visibleArchives = useMemo(() => {
+    const anchor = new Date(`${archiveDate}T12:00:00`);
+    const start = new Date(anchor);
+    const end = new Date(anchor);
+    if (archivePeriod === "month") { start.setDate(1); end.setMonth(end.getMonth() + 1); end.setDate(1); }
+    else if (archivePeriod === "week") { const day = start.getDay(); const diff = day === 0 ? -6 : 1 - day; start.setDate(start.getDate() + diff); end.setTime(start.getTime()); end.setDate(start.getDate() + 7); }
+    else if (archivePeriod === "year") { start.setMonth(0, 1); end.setFullYear(end.getFullYear() + 1, 0, 1); }
+    else return archives;
+    return archives.filter(r => { const created = new Date((r.data as any).created_at ?? r.archived_period_start); return created >= start && created < end; });
+  }, [archives, archivePeriod, archiveDate]);
+
+  async function deleteArchive(id: string) {
+    if (currentRole !== "owner") return setMessage("Only the owner can permanently delete archived records.");
+    requestConfirm({
+      title: "Delete archived record?",
+      message: "Permanently delete this archived record? This cannot be undone.",
+      confirmLabel: "Delete",
+      danger: true,
+      action: async () => {
+        const { error } = await supabase.from("archive_records").delete().eq("id", id);
+        if (error) setMessage(error.message); else await loadAll();
+      },
+    });
+  }
+
   if (!session) return <Login email={email} password={password} setEmail={setEmail} setPassword={setPassword} login={login} message={message} />;
 
-  const activeTitle = view === "overview" ? "Overview" : view === "gamepasses" ? "Gamepass orders" : view === "payouts" ? "Robux payouts" : "Settings";
+  const activeTitle = view === "overview" ? "Overview" : view === "gamepasses" ? "Gamepass orders" : view === "payouts" ? "Robux payouts" : view === "archive" ? "Archive" : "Settings";
 
   return (
     <main className="app-shell">
@@ -215,18 +341,28 @@ export default function Home() {
         <div className="top-actions">
           <button className="icon-btn" onClick={() => setDarkMode(v => !v)} title={darkMode ? "Switch to light mode" : "Switch to dark mode"} aria-label="Toggle theme">{darkMode ? <Sun size={17} /> : <Moon size={17} />}</button>
           <button className="icon-btn" onClick={loadAll} title="Refresh records" aria-label="Refresh"><RefreshCw size={17} className={loading ? "spin" : ""} /></button>
-          <button className="account-chip" onClick={() => go("settings")} title="Open settings"><span className="account-avatar">{(session.user.email?.[0] ?? "C").toUpperCase()}</span><span className="account-email">{session.user.email}</span><ChevronDown size={14} /></button>
+          <button className="account-chip" onClick={() => go("settings")} title="Open settings"><span className="account-avatar">
+  <img
+    src={
+      session.user.email?.toLowerCase() === OWNER_EMAIL
+        ? "/owner.jpg"
+        : "/admin.jpg"
+    }
+    alt={currentRole === "owner" ? "Owner" : "Admin"}
+  />
+</span><span className="account-email">{currentRole === "owner" ? "Owner" : "Admin"}</span><ChevronDown size={14} /></button>
         </div>
       </header>
 
       {mobileNavOpen && <button className="mobile-nav-overlay" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
       <div className="workspace">
         <aside className={`sidebar ${mobileNavOpen ? "mobile-open" : ""}`}>
-          <div className="sidebar-brand"><Logo className="sidebar-logo" /><div><strong>Chérie</strong><span>Internal workspace</span></div></div>
-          <div className="sidebar-section-label">Workspace</div>
+          <div className="sidebar-context"><span>WORKSPACE</span><strong>Order Desk</strong></div>
+          <div className="sidebar-section-label">Navigate</div>
           <NavButton active={view === "overview"} icon={<ArrowUpRight size={16} />} onClick={() => go("overview")}>Overview</NavButton>
           <NavButton active={view === "gamepasses"} icon={<Gamepad2 size={16} />} onClick={() => go("gamepasses")}><span className="nav-label">Gamepass orders</span><span className="nav-count">{gamepasses.length}</span></NavButton>
           <NavButton active={view === "payouts"} icon={<WalletCards size={16} />} onClick={() => go("payouts")}><span className="nav-label">Robux payouts</span><span className="nav-count">{payouts.length}</span></NavButton>
+          <NavButton active={view === "archive"} icon={<Archive size={16} />} onClick={() => go("archive")}><span className="nav-label">Archive</span><span className="nav-count">{archives.length}</span></NavButton>
           <div className="sidebar-divider" />
           <div className="sidebar-section-label">Manage</div>
           <NavButton active={view === "settings"} icon={<Settings size={16} />} onClick={() => go("settings")}>Settings</NavButton>
@@ -238,7 +374,7 @@ export default function Home() {
 
         <section className="content">
           <div className="page-heading">
-            <div><p className="breadcrumb">Workspace <span>/</span> {activeTitle}</p><h1>{activeTitle}</h1></div>
+            <div className="page-title-block"><span className="page-kicker">CHÉRIE ORDER DESK</span><h1>{activeTitle}</h1></div>
             {view === "gamepasses" && <button className="primary-btn" onClick={openGamepassModal}><Plus size={16} /> New order</button>}
             {view === "payouts" && <button className="primary-btn" onClick={openPayoutModal}><Plus size={16} /> New payout</button>}
           </div>
@@ -248,14 +384,17 @@ export default function Home() {
           {view === "gamepasses" && <>
             <div className="summary-row"><Summary label="Pending" value={money(pendingGamepasses)} detail="Not yet sent to supp" tone="amber" /><Summary label="Processing" value={money(processingGamepasses)} detail="Already sent to supp" tone="blue" /><Summary label="Completed" value={money(completedGamepasses)} detail="Gamepass already bought" tone="green" /><Summary label="Orders" value={String(gamepasses.length)} detail="All gamepass records" tone="neutral" /></div>
             <Toolbar search={search} setSearch={setSearch} statusFilter={statusFilter} setStatusFilter={setStatusFilter} thirdLabel="Process" thirdValue={processFilter} thirdOptions={["all", "fast", "slow"]} setThirdValue={v => setProcessFilter(v as "all" | ProcessType)} />
-            <GamepassTable orders={visibleGamepasses} loading={loading} onStatus={updateGamepassStatus} />
+            {selectedGamepasses.size > 0 && <SelectionBar count={selectedGamepasses.size} busy={bulkBusy} onClear={() => setSelectedGamepasses(new Set())} onArchive={() => requestConfirm({ title: "Archive selected orders?", message: `Archive ${selectedGamepasses.size} gamepass order(s) now? They'll move to the Archive tab.`, confirmLabel: "Archive", action: archiveSelectedGamepasses })} onDelete={() => requestConfirm({ title: "Delete selected orders?", message: `Permanently delete ${selectedGamepasses.size} gamepass order(s)? This cannot be undone.`, confirmLabel: "Delete", danger: true, action: deleteSelectedGamepasses })} />}
+            <GamepassTable orders={visibleGamepasses} loading={loading} onStatus={updateGamepassStatus} selected={selectedGamepasses} onToggle={toggleGamepassSelected} onToggleAll={toggleAllGamepasses} />
           </>}
           {view === "payouts" && <>
             <div className="summary-row"><Summary label="Pending" value={money(pendingPayouts)} detail="Not yet sent" tone="amber" /><Summary label="Processing" value={money(processingPayouts)} detail="Already sent" tone="blue" /><Summary label="Completed" value={money(completedPayouts)} detail="Robux sent" tone="green" /><Summary label="Payouts" value={String(payouts.length)} detail="All payout records" tone="neutral" /></div>
             <Toolbar search={search} setSearch={setSearch} statusFilter={statusFilter} setStatusFilter={setStatusFilter} thirdLabel="Group" thirdValue={groupFilter} thirdOptions={["all", ...GROUPS]} setThirdValue={v => setGroupFilter(v as "all" | SourceGroup)} />
-            <PayoutTable payouts={visiblePayouts} loading={loading} onStatus={updatePayoutStatus} />
+            {selectedPayouts.size > 0 && <SelectionBar count={selectedPayouts.size} busy={bulkBusy} onClear={() => setSelectedPayouts(new Set())} onArchive={() => requestConfirm({ title: "Archive selected payouts?", message: `Archive ${selectedPayouts.size} Robux payout(s) now? They'll move to the Archive tab.`, confirmLabel: "Archive", action: archiveSelectedPayouts })} onDelete={() => requestConfirm({ title: "Delete selected payouts?", message: `Permanently delete ${selectedPayouts.size} Robux payout(s)? This cannot be undone.`, confirmLabel: "Delete", danger: true, action: deleteSelectedPayouts })} />}
+            <PayoutTable payouts={visiblePayouts} loading={loading} onStatus={updatePayoutStatus} selected={selectedPayouts} onToggle={togglePayoutSelected} onToggleAll={toggleAllPayouts} />
           </>}
-          {view === "settings" && <SettingsView session={session} darkMode={darkMode} setDarkMode={setDarkMode} onRefresh={loadAll} onSignOut={logout} />}
+          {view === "archive" && <ArchiveView records={visibleArchives} period={archivePeriod} setPeriod={setArchivePeriod} date={archiveDate} setDate={setArchiveDate} canDelete={currentRole === "owner"} onDelete={deleteArchive} selected={selectedArchives} onToggle={toggleArchiveSelected} onToggleAll={toggleAllArchives} bulkBusy={bulkBusy} onDeleteSelected={() => requestConfirm({ title: "Delete archived records?", message: `Permanently delete ${selectedArchives.size} archived record(s)? This cannot be undone.`, confirmLabel: "Delete", danger: true, action: deleteSelectedArchives })} />}
+          {view === "settings" && <SettingsView session={session} role={currentRole} darkMode={darkMode} setDarkMode={setDarkMode} onRefresh={loadAll} onSignOut={logout} />}
         </section>
       </div>
       <footer><span>Chérie Order Desk</span><span>Private staff workspace · Supabase authenticated</span></footer>
@@ -287,6 +426,7 @@ export default function Home() {
           <div className="form-actions field-span"><button type="button" className="secondary-btn" onClick={() => setShowPayoutModal(false)}>Cancel</button><button type="submit" className="primary-btn"><Check size={16} /> Create payout</button></div>
         </form>
       </Modal>}
+      {confirmDialog && <ConfirmDialog {...confirmDialog} busy={confirmBusy} onConfirm={runConfirmDialog} onCancel={() => setConfirmDialog(null)} />}
     </main>
   );
 }
@@ -306,12 +446,97 @@ function Dropdown({ value, onChange, options, className = "" }: { value: string;
   return <div className={`dropdown-wrap ${className}`}><button ref={triggerRef} type="button" className={`dropdown-trigger ${open ? "open" : ""}`} onClick={() => setOpen(v => !v)} aria-haspopup="listbox" aria-expanded={open}><span>{selected?.label ?? value}</span><ChevronDown size={14} className={open ? "rotate" : ""} /></button>{open && typeof document !== "undefined" && createPortal(<div id="cherie-dropdown-menu" className="dropdown-menu" style={{ top: position.top, left: position.left, minWidth: position.width }} role="listbox">{options.map(option => <button key={option.value} type="button" className={`dropdown-option ${option.value === value ? "selected" : ""}`} onClick={() => { onChange(option.value); setOpen(false); }} role="option" aria-selected={option.value === value}><span className="dropdown-option-copy"><strong>{option.label}</strong>{option.hint && <small>{option.hint}</small>}</span>{option.value === value && <Check size={15} />}</button>)}</div>, document.body)}</div>;
 }
 
+function DatePicker({ value, onChange, className = "" }: { value: string; onChange: (value: string) => void; className?: string }) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const selectedDate = value ? new Date(`${value}T12:00:00`) : new Date();
+  const [viewYear, setViewYear] = useState(selectedDate.getFullYear());
+  const [viewMonth, setViewMonth] = useState(selectedDate.getMonth());
+
+  useEffect(() => {
+    const d = value ? new Date(`${value}T12:00:00`) : new Date();
+    setViewYear(d.getFullYear()); setViewMonth(d.getMonth());
+  }, [value]);
+
+  useEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const rect = triggerRef.current?.getBoundingClientRect(); if (!rect) return;
+      const width = 280; const height = 340;
+      const left = Math.max(10, Math.min(rect.left, window.innerWidth - width - 10));
+      const top = window.innerHeight - rect.bottom < height && rect.top > height ? rect.top - height - 7 : rect.bottom + 7;
+      setPosition({ top, left });
+    };
+    update();
+    window.addEventListener("resize", update); window.addEventListener("scroll", update, true);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    window.addEventListener("keydown", esc);
+    return () => { window.removeEventListener("resize", update); window.removeEventListener("scroll", update, true); window.removeEventListener("keydown", esc); };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const down = (event: PointerEvent) => {
+      const target = event.target as Node;
+      const menu = document.getElementById("cherie-datepicker-menu");
+      if (!triggerRef.current?.contains(target) && !menu?.contains(target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", down);
+    return () => document.removeEventListener("pointerdown", down);
+  }, [open]);
+
+  const monthLabel = new Date(viewYear, viewMonth, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const displayLabel = selectedDate.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+
+  function goMonth(delta: number) {
+    let m = viewMonth + delta, y = viewYear;
+    if (m < 0) { m = 11; y -= 1; } if (m > 11) { m = 0; y += 1; }
+    setViewMonth(m); setViewYear(y);
+  }
+  function toKey(y: number, m: number, d: number) { return `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`; }
+
+  const firstDay = new Date(viewYear, viewMonth, 1).getDay();
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const daysInPrevMonth = new Date(viewYear, viewMonth, 0).getDate();
+  const cells: { day: number; muted: boolean; key: string }[] = [];
+  for (let i = firstDay - 1; i >= 0; i--) cells.push({ day: daysInPrevMonth - i, muted: true, key: "" });
+  for (let d = 1; d <= daysInMonth; d++) cells.push({ day: d, muted: false, key: toKey(viewYear, viewMonth, d) });
+  while (cells.length % 7 !== 0) { const idx = cells.length - (firstDay + daysInMonth); cells.push({ day: idx + 1, muted: true, key: "" }); }
+
+  const todayKey = toKey(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+
+  return <div className={`datepicker-wrap ${className}`}>
+    <button ref={triggerRef} type="button" className={`datepicker-trigger ${open ? "open" : ""}`} onClick={() => setOpen(v => !v)}>
+      <CalendarDays size={14} /><span>{displayLabel}</span>
+    </button>
+    {open && typeof document !== "undefined" && createPortal(
+      <div id="cherie-datepicker-menu" className="datepicker-menu" style={{ top: position.top, left: position.left }}>
+        <div className="datepicker-head">
+          <strong>{monthLabel}</strong>
+          <div className="datepicker-nav"><button type="button" onClick={() => goMonth(-1)} aria-label="Previous month">‹</button><button type="button" onClick={() => goMonth(1)} aria-label="Next month">›</button></div>
+        </div>
+        <div className="datepicker-weekdays">{["Su","Mo","Tu","We","Th","Fr","Sa"].map(d => <span key={d}>{d}</span>)}</div>
+        <div className="datepicker-grid">
+          {cells.map((cell, i) => {
+            const isSelected = cell.key === value;
+            const isToday = cell.key === todayKey;
+            return <button key={i} type="button" disabled={cell.muted} className={`datepicker-cell ${cell.muted ? "muted" : ""} ${isSelected ? "selected" : ""} ${isToday && !isSelected ? "today" : ""}`} onClick={() => { onChange(cell.key); setOpen(false); }}>{cell.day}</button>;
+          })}
+        </div>
+        <div className="datepicker-footer">
+          <button type="button" onClick={() => { const t = new Date(); onChange(toKey(t.getFullYear(), t.getMonth(), t.getDate())); setOpen(false); }}>Today</button>
+        </div>
+      </div>, document.body)}
+  </div>;
+}
+
 function NavButton({ active, icon, children, onClick }: { active: boolean; icon: ReactNode; children: ReactNode; onClick: () => void }) { return <button className={`nav-btn ${active ? "active" : ""}`} onClick={onClick}>{icon}<span className="nav-content">{children}</span></button>; }
 function Summary({ label, value, detail, tone }: { label: string; value: string; detail: string; tone: string }) { return <div className={`summary-card ${tone}`}><div className="summary-mark" /><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>; }
 
 function Overview(props: { gamepasses: GamepassOrder[]; payouts: RobuxPayout[]; pendingGamepasses: number; processingGamepasses: number; pendingPayouts: number; processingPayouts: number; completedGamepasses: number; completedPayouts: number; onGamepasses: () => void; onPayouts: () => void }) {
   const activity = [...props.gamepasses.map(o => ({ id: `g-${o.id}`, type: "Gamepass", buyer: o.buyer_username, amount: o.robux_amount, status: o.status, date: o.created_at })), ...props.payouts.map(o => ({ id: `p-${o.id}`, type: "Payout", buyer: o.buyer_username, amount: o.robux_amount, status: o.status, date: o.created_at }))].sort((a, b) => +new Date(b.date) - +new Date(a.date)).slice(0, 8);
-  return <><div className="hero-panel"><div><span className="eyebrow">WORKSPACE OVERVIEW</span><h2>Keep every order moving.</h2><p>See what is waiting, what has already been sent to the supplier, and what your staff has completed.</p></div><div className="hero-actions"><button className="secondary-btn" onClick={props.onGamepasses}><Gamepad2 size={16} /> Gamepass orders</button><button className="secondary-btn" onClick={props.onPayouts}><WalletCards size={16} /> Robux payouts</button></div></div><div className="overview-grid"><OverviewCard icon={<Gamepad2 size={18} />} label="Gamepass outstanding" value={money(props.pendingGamepasses + props.processingGamepasses)} detail={`${money(props.pendingGamepasses)} pending · ${money(props.processingGamepasses)} processing`} /><OverviewCard icon={<CircleDollarSign size={18} />} label="Robux payout outstanding" value={money(props.pendingPayouts + props.processingPayouts)} detail={`${money(props.pendingPayouts)} pending · ${money(props.processingPayouts)} processing`} /><OverviewCard icon={<Check size={18} />} label="Completed" value={money(props.completedGamepasses + props.completedPayouts)} detail={`${money(props.completedGamepasses)} gamepasses · ${money(props.completedPayouts)} payouts`} /><OverviewCard icon={<Users size={18} />} label="Total records" value={String(props.gamepasses.length + props.payouts.length)} detail={`${props.gamepasses.length} gamepasses · ${props.payouts.length} payouts`} /></div><div className="activity-card"><div className="section-title"><div><span className="eyebrow">RECENT ACTIVITY</span><h2>Latest records</h2></div></div>{activity.length === 0 ? <Empty title="No records yet" text="Your newest orders and payouts will appear here." /> : <div className="activity-list">{activity.map(item => <div className="activity-item" key={item.id}><div className="activity-dot" /><div className="activity-main"><strong>@{item.buyer}</strong><span>{item.type} · {dateTime(item.date)}</span></div><div className="activity-amount">{money(item.amount)}</div><StatusBadge status={item.status} /></div>)}</div>}</div></>;
+  return <><div className="hero-panel"><div><span className="eyebrow">TODAY</span><h2>Keep every order moving.</h2><p>See what is waiting, what has already been sent to the supplier, and what your staff has completed.</p></div><div className="hero-actions"><button className="secondary-btn" onClick={props.onGamepasses}><Gamepad2 size={16} /> Gamepass orders</button><button className="secondary-btn" onClick={props.onPayouts}><WalletCards size={16} /> Robux payouts</button></div></div><div className="overview-grid"><OverviewCard icon={<Gamepad2 size={18} />} label="Gamepass outstanding" value={money(props.pendingGamepasses + props.processingGamepasses)} detail={`${money(props.pendingGamepasses)} pending · ${money(props.processingGamepasses)} processing`} /><OverviewCard icon={<CircleDollarSign size={18} />} label="Robux payout outstanding" value={money(props.pendingPayouts + props.processingPayouts)} detail={`${money(props.pendingPayouts)} pending · ${money(props.processingPayouts)} processing`} /><OverviewCard icon={<Check size={18} />} label="Completed" value={money(props.completedGamepasses + props.completedPayouts)} detail={`${money(props.completedGamepasses)} gamepasses · ${money(props.completedPayouts)} payouts`} /><OverviewCard icon={<Users size={18} />} label="Total records" value={String(props.gamepasses.length + props.payouts.length)} detail={`${props.gamepasses.length} gamepasses · ${props.payouts.length} payouts`} /></div><div className="activity-card"><div className="section-title"><div><span className="eyebrow">RECENT ACTIVITY</span><h2>Latest records</h2></div></div>{activity.length === 0 ? <Empty title="No records yet" text="Your newest orders and payouts will appear here." /> : <div className="activity-list">{activity.map(item => <div className="activity-item" key={item.id}><div className="activity-dot" /><div className="activity-main"><strong>@{item.buyer}</strong><span>{item.type} · {dateTime(item.date)}</span></div><div className="activity-amount">{money(item.amount)}</div><StatusBadge status={item.status} /></div>)}</div>}</div></>;
 }
 function OverviewCard({ icon, label, value, detail }: { icon: ReactNode; label: string; value: string; detail: string }) { return <div className="overview-card"><div className="card-icon">{icon}</div><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></div>; }
 
@@ -320,26 +545,87 @@ function Toolbar({ search, setSearch, statusFilter, setStatusFilter, thirdLabel,
   return <div className="toolbar"><div className="search-box"><Search size={16} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search buyer, recipient, amount, or link..." /><kbd>⌘ K</kbd></div><div className="toolbar-select"><Dropdown value={statusFilter} onChange={v => setStatusFilter(v as "all" | OrderStatus)} options={["all", ...STATUSES].map(v => ({ value: v, label: v === "all" ? "All statuses" : statusLabel(v) }))} /></div><div className="toolbar-select"><Dropdown value={thirdValue} onChange={setThirdValue} options={thirdOptions.map(v => ({ value: v, label: v === "all" ? `All ${thirdLabel.toLowerCase()}s` : label(v) }))} /></div></div>;
 }
 
-function GamepassTable({ orders, loading, onStatus }: { orders: GamepassOrder[]; loading: boolean; onStatus: (id: string, status: OrderStatus) => void }) {
-  return <><div className="table-card desktop-table"><div className="table-wrap"><table><thead><tr><th>Buyer</th><th>Robux</th><th>Process</th><th>Gamepass links</th><th>Status</th><th>Added</th></tr></thead><tbody>{loading ? <tr><td colSpan={6}><div className="table-empty">Loading records...</div></td></tr> : orders.length === 0 ? <tr><td colSpan={6}><Empty title="No gamepass orders" text="Try changing your filters or add a new order." /></td></tr> : orders.map(o => <tr key={o.id}><td><strong className="table-buyer">@{o.buyer_username}</strong>{o.notes && <small className="table-note">{o.notes}</small>}</td><td><strong className="amount">{money(o.robux_amount)}</strong></td><td><span className={`process-chip ${o.process_type}`}>{o.process_type}</span></td><td><GamepassLinks order={o} /></td><td><StatusSelect status={o.status} onChange={v => onStatus(o.id, v)} /></td><td className="date-cell">{dateTime(o.created_at)}</td></tr>)}</tbody></table></div></div><div className="mobile-record-list">{loading ? <div className="mobile-empty">Loading records...</div> : orders.length === 0 ? <Empty title="No gamepass orders" text="Try changing your filters or add a new order." /> : orders.map(o => <GamepassMobileCard key={o.id} order={o} onStatus={onStatus} />)}</div></>;
+function SelectionBar({ count, busy, onClear, onArchive, onDelete }: { count: number; busy: boolean; onClear: () => void; onArchive?: () => void; onDelete: () => void }) {
+  return <div className="selection-bar"><span className="selection-count">{count} selected</span><div className="selection-actions"><button className="secondary-btn" type="button" disabled={busy} onClick={onClear}>Clear</button>{onArchive && <button className="secondary-btn" type="button" disabled={busy} onClick={onArchive}><Archive size={15} /> Archive</button>}<button className="secondary-btn danger" type="button" disabled={busy} onClick={onDelete}><Trash2 size={15} /> Delete</button></div></div>;
+}
+function ConfirmDialog({ title, message, confirmLabel, danger, busy, onConfirm, onCancel }: { title: string; message: string; confirmLabel: string; danger: boolean; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
+  useEffect(() => { const esc = (e: KeyboardEvent) => e.key === "Escape" && !busy && onCancel(); window.addEventListener("keydown", esc); return () => window.removeEventListener("keydown", esc); }, [busy, onCancel]);
+  return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && !busy && onCancel()}>
+    <div className="confirm-dialog">
+      <div className={`confirm-icon ${danger ? "danger" : ""}`}>{danger ? <Trash2 size={18} /> : <Archive size={18} />}</div>
+      <h3>{title}</h3>
+      <p>{message}</p>
+      <div className="confirm-actions">
+        <button type="button" className="secondary-btn" disabled={busy} onClick={onCancel}>Cancel</button>
+        <button type="button" className={`primary-btn ${danger ? "danger" : ""}`} disabled={busy} onClick={onConfirm}>{busy ? "Working..." : confirmLabel}</button>
+      </div>
+    </div>
+  </div>;
+}
+function HeaderCheckbox({ ids, selected, onToggleAll }: { ids: string[]; selected: Set<string>; onToggleAll: (ids: string[], checked: boolean) => void }) {
+  const allSelected = ids.length > 0 && ids.every(id => selected.has(id));
+  const someSelected = !allSelected && ids.some(id => selected.has(id));
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (ref.current) ref.current.indeterminate = someSelected; }, [someSelected]);
+  return <input ref={ref} type="checkbox" className="row-checkbox" checked={allSelected} onChange={e => onToggleAll(ids, e.target.checked)} aria-label="Select all rows" />;
+}
+
+function GamepassTable({ orders, loading, onStatus, selected, onToggle, onToggleAll }: { orders: GamepassOrder[]; loading: boolean; onStatus: (id: string, status: OrderStatus) => void; selected: Set<string>; onToggle: (id: string) => void; onToggleAll: (ids: string[], checked: boolean) => void }) {
+  const ids = orders.map(o => o.id);
+  return <><div className="table-card desktop-table"><div className="table-wrap"><table><thead><tr><th className="checkbox-col"><HeaderCheckbox ids={ids} selected={selected} onToggleAll={onToggleAll} /></th><th>Buyer</th><th>Robux</th><th>Process</th><th>Gamepass links</th><th>Status</th><th>Added</th><th>Added by</th><th>Updated by</th></tr></thead><tbody>{loading ? <tr><td colSpan={9}><div className="table-empty">Loading records...</div></td></tr> : orders.length === 0 ? <tr><td colSpan={9}><Empty title="No gamepass orders" text="Try changing your filters or add a new order." /></td></tr> : orders.map(o => <tr key={o.id} className={selected.has(o.id) ? "row-selected" : ""}><td className="checkbox-col"><input type="checkbox" className="row-checkbox" checked={selected.has(o.id)} onChange={() => onToggle(o.id)} aria-label={`Select order from @${o.buyer_username}`} /></td><td><strong className="table-buyer">@{o.buyer_username}</strong>{o.notes && <small className="table-note">{o.notes}</small>}</td><td><strong className="amount">{money(o.robux_amount)}</strong></td><td><span className={`process-chip ${o.process_type}`}>{o.process_type}</span></td><td><GamepassLinks order={o} /></td><td><StatusSelect status={o.status} onChange={v => onStatus(o.id, v)} /></td><td className="date-cell">{dateTime(o.created_at)}</td><td className="actor-cell">{staffLabel(o.created_by_email)}</td><td className="actor-cell">{staffLabel(o.updated_by_email ?? o.created_by_email)}</td></tr>)}</tbody></table></div></div><div className="mobile-record-list">{loading ? <div className="mobile-empty">Loading records...</div> : orders.length === 0 ? <Empty title="No gamepass orders" text="Try changing your filters or add a new order." /> : orders.map(o => <GamepassMobileCard key={o.id} order={o} onStatus={onStatus} selected={selected.has(o.id)} onToggle={() => onToggle(o.id)} />)}</div></>;
 }
 function GamepassLinks({ order }: { order: GamepassOrder }) {
   const links = parseGamepassLinks(order);
   return <div className="links-list">{links.map((item, index) => <a key={`${item.link}-${index}`} className="link-row" href={item.link} target="_blank" rel="noreferrer"><span className="link-index">{index + 1}</span><span className="link-copy"><strong>{money(item.amount)}</strong><span>{item.link}</span></span><ExternalLink size={14} /></a>)}</div>;
 }
-function GamepassMobileCard({ order, onStatus }: { order: GamepassOrder; onStatus: (id: string, status: OrderStatus) => void }) { return <article className="record-card"><div className="record-card-head"><div><strong>@{order.buyer_username}</strong><span>{dateTime(order.created_at)}</span></div><StatusSelect status={order.status} onChange={v => onStatus(order.id, v)} /></div><div className="record-meta"><span><b>{money(order.robux_amount)}</b> total</span><span className={`process-chip ${order.process_type}`}>{order.process_type}</span></div><GamepassLinks order={order} />{order.notes && <p className="record-note">{order.notes}</p>}</article>; }
+function GamepassMobileCard({ order, onStatus, selected, onToggle }: { order: GamepassOrder; onStatus: (id: string, status: OrderStatus) => void; selected: boolean; onToggle: () => void }) { return <article className={`record-card ${selected ? "row-selected" : ""}`}><div className="record-card-head"><label className="record-select"><input type="checkbox" className="row-checkbox" checked={selected} onChange={onToggle} aria-label={`Select order from @${order.buyer_username}`} /><div><strong>@{order.buyer_username}</strong><span>{dateTime(order.created_at)}</span></div></label><StatusSelect status={order.status} onChange={v => onStatus(order.id, v)} /></div><div className="record-meta"><span><b>{money(order.robux_amount)}</b> total</span><span className={`process-chip ${order.process_type}`}>{order.process_type}</span></div><GamepassLinks order={order} />{order.notes && <p className="record-note">{order.notes}</p>}<div className="record-audit"><span>Added by <b>{staffLabel(order.created_by_email)}</b></span><span>Updated by <b>{staffLabel(order.updated_by_email ?? order.created_by_email)}</b></span></div></article>; }
 
-function PayoutTable({ payouts, loading, onStatus }: { payouts: RobuxPayout[]; loading: boolean; onStatus: (id: string, status: PayoutStatus) => void }) {
-  return <><div className="table-card desktop-table"><div className="table-wrap"><table><thead><tr><th>Buyer</th><th>Send to</th><th>Robux</th><th>From group</th><th>Status</th><th>Added</th></tr></thead><tbody>{loading ? <tr><td colSpan={6}><div className="table-empty">Loading records...</div></td></tr> : payouts.length === 0 ? <tr><td colSpan={6}><Empty title="No Robux payouts" text="Try changing your filters or add a new payout." /></td></tr> : payouts.map(o => <tr key={o.id}><td><strong className="table-buyer">@{o.buyer_username}</strong>{o.notes && <small className="table-note">{o.notes}</small>}</td><td><strong className="recipient">@{o.roblox_username}</strong><small className="recipient-label">Roblox recipient</small></td><td><strong className="amount">{money(o.robux_amount)}</strong></td><td><span className="group-chip">{o.source_group}</span></td><td><StatusSelect status={o.status} onChange={v => onStatus(o.id, v)} /></td><td className="date-cell">{dateTime(o.created_at)}</td></tr>)}</tbody></table></div></div><div className="mobile-record-list">{loading ? <div className="mobile-empty">Loading records...</div> : payouts.length === 0 ? <Empty title="No Robux payouts" text="Try changing your filters or add a new payout." /> : payouts.map(o => <PayoutMobileCard key={o.id} payout={o} onStatus={onStatus} />)}</div></>;
+function PayoutTable({ payouts, loading, onStatus, selected, onToggle, onToggleAll }: { payouts: RobuxPayout[]; loading: boolean; onStatus: (id: string, status: PayoutStatus) => void; selected: Set<string>; onToggle: (id: string) => void; onToggleAll: (ids: string[], checked: boolean) => void }) {
+  const ids = payouts.map(o => o.id);
+  return <><div className="table-card desktop-table"><div className="table-wrap"><table><thead><tr><th className="checkbox-col"><HeaderCheckbox ids={ids} selected={selected} onToggleAll={onToggleAll} /></th><th>Buyer</th><th>Send to</th><th>Robux</th><th>From group</th><th>Status</th><th>Added</th><th>Added by</th><th>Updated by</th></tr></thead><tbody>{loading ? <tr><td colSpan={9}><div className="table-empty">Loading records...</div></td></tr> : payouts.length === 0 ? <tr><td colSpan={9}><Empty title="No Robux payouts" text="Try changing your filters or add a new payout." /></td></tr> : payouts.map(o => <tr key={o.id} className={selected.has(o.id) ? "row-selected" : ""}><td className="checkbox-col"><input type="checkbox" className="row-checkbox" checked={selected.has(o.id)} onChange={() => onToggle(o.id)} aria-label={`Select payout to @${o.roblox_username}`} /></td><td><strong className="table-buyer">@{o.buyer_username}</strong>{o.notes && <small className="table-note">{o.notes}</small>}</td><td><strong className="recipient">@{o.roblox_username}</strong><small className="recipient-label">Roblox recipient</small></td><td><strong className="amount">{money(o.robux_amount)}</strong></td><td><span className="group-chip">{o.source_group}</span></td><td><StatusSelect status={o.status} onChange={v => onStatus(o.id, v)} /></td><td className="date-cell">{dateTime(o.created_at)}</td><td className="actor-cell">{staffLabel(o.created_by_email)}</td><td className="actor-cell">{staffLabel(o.updated_by_email ?? o.created_by_email)}</td></tr>)}</tbody></table></div></div><div className="mobile-record-list">{loading ? <div className="mobile-empty">Loading records...</div> : payouts.length === 0 ? <Empty title="No Robux payouts" text="Try changing your filters or add a new payout." /> : payouts.map(o => <PayoutMobileCard key={o.id} payout={o} onStatus={onStatus} selected={selected.has(o.id)} onToggle={() => onToggle(o.id)} />)}</div></>;
 }
-function PayoutMobileCard({ payout, onStatus }: { payout: RobuxPayout; onStatus: (id: string, status: PayoutStatus) => void }) { return <article className="record-card"><div className="record-card-head"><div><strong>@{payout.buyer_username}</strong><span>{dateTime(payout.created_at)}</span></div><StatusSelect status={payout.status} onChange={v => onStatus(payout.id, v)} /></div><div className="recipient-card"><span>Send Robux to</span><strong>@{payout.roblox_username}</strong></div><div className="record-meta"><span><b>{money(payout.robux_amount)}</b></span><span className="group-chip">{payout.source_group}</span></div>{payout.notes && <p className="record-note">{payout.notes}</p>}</article>; }
+function PayoutMobileCard({ payout, onStatus, selected, onToggle }: { payout: RobuxPayout; onStatus: (id: string, status: PayoutStatus) => void; selected: boolean; onToggle: () => void }) { return <article className={`record-card ${selected ? "row-selected" : ""}`}><div className="record-card-head"><label className="record-select"><input type="checkbox" className="row-checkbox" checked={selected} onChange={onToggle} aria-label={`Select payout to @${payout.roblox_username}`} /><div><strong>@{payout.buyer_username}</strong><span>{dateTime(payout.created_at)}</span></div></label><StatusSelect status={payout.status} onChange={v => onStatus(payout.id, v)} /></div><div className="recipient-card"><span>Send Robux to</span><strong>@{payout.roblox_username}</strong></div><div className="record-meta"><span><b>{money(payout.robux_amount)}</b></span><span className="group-chip">{payout.source_group}</span></div>{payout.notes && <p className="record-note">{payout.notes}</p>}<div className="record-audit"><span>Added by <b>{staffLabel(payout.created_by_email)}</b></span><span>Updated by <b>{staffLabel(payout.updated_by_email ?? payout.created_by_email)}</b></span></div></article>; }
 
 function StatusSelect({ status, onChange }: { status: OrderStatus; onChange: (status: OrderStatus) => void }) { return <div className={`status-select ${status}`}><Dropdown value={status} onChange={v => onChange(v as OrderStatus)} options={STATUSES.map(s => ({ value: s, label: statusLabel(s) }))} /></div>; }
 function StatusBadge({ status }: { status: OrderStatus }) { return <span className={`status-badge ${status}`}>{statusLabel(status)}</span>; }
 function Empty({ title, text }: { title: string; text: string }) { return <div className="empty"><div className="empty-icon"><Search size={16} /></div><strong>{title}</strong><span>{text}</span></div>; }
 
-function SettingsView({ session, darkMode, setDarkMode, onRefresh, onSignOut }: { session: Session; darkMode: boolean; setDarkMode: (v: boolean) => void; onRefresh: () => void; onSignOut: () => void }) {
-  return <div className="settings-page"><div className="settings-intro"><div><span className="eyebrow">PREFERENCES</span><h2>Settings</h2><p>Control how this workspace looks and manage your staff session.</p></div></div><div className="settings-grid"><section className="settings-card"><div className="settings-card-head"><div className="settings-icon"><Sun size={17} /></div><div><strong>Appearance</strong><span>Choose your workspace theme.</span></div></div><div className="theme-options"><button className={`theme-option ${!darkMode ? "selected" : ""}`} onClick={() => setDarkMode(false)}><Sun size={17} /><span><b>Light</b><small>Clean white workspace</small></span>{!darkMode && <Check size={16} />}</button><button className={`theme-option ${darkMode ? "selected" : ""}`} onClick={() => setDarkMode(true)}><Moon size={17} /><span><b>Dark</b><small>Low-light workspace</small></span>{darkMode && <Check size={16} />}</button></div></section><section className="settings-card"><div className="settings-card-head"><div className="settings-icon"><Users size={17} /></div><div><strong>Staff account</strong><span>Your authenticated workspace identity.</span></div></div><div className="account-detail"><span className="account-avatar large">{(session.user.email?.[0] ?? "C").toUpperCase()}</span><div><strong>{session.user.email}</strong><small>Authenticated staff member</small></div></div></section><section className="settings-card"><div className="settings-card-head"><div className="settings-icon"><RefreshCw size={17} /></div><div><strong>Workspace actions</strong><span>Useful controls for shared records.</span></div></div><button className="settings-action" onClick={onRefresh}><span><RefreshCw size={16} /><b>Refresh records</b></span><ArrowUpRight size={15} /></button><button className="settings-action danger" onClick={onSignOut}><span><LogOut size={16} /><b>Sign out</b></span><ArrowUpRight size={15} /></button></section><section className="settings-card"><div className="settings-card-head"><div className="settings-icon"><Settings size={17} /></div><div><strong>Workspace</strong><span>Current application information.</span></div></div><div className="info-list"><div><span>Workspace</span><b>Chérie RBX Order Desk</b></div><div><span>Access</span><b>Private staff workspace</b></div><div><span>Data</span><b>Shared through Supabase</b></div></div></section></div></div>;
+function ArchiveView({ records, period, setPeriod, date, setDate, canDelete, onDelete, selected, onToggle, onToggleAll, bulkBusy, onDeleteSelected }: { records: ArchiveRecord[]; period: "month" | "week" | "year" | "all"; setPeriod: (v: "month" | "week" | "year" | "all") => void; date: string; setDate: (v: string) => void; canDelete: boolean; onDelete: (id: string) => void; selected: Set<string>; onToggle: (id: string) => void; onToggleAll: (ids: string[], checked: boolean) => void; bulkBusy: boolean; onDeleteSelected: () => void }) {
+  const label = period === "all" ? "All archived records" : period === "month" ? "Monthly archive" : period === "week" ? "Weekly archive" : "Yearly archive";
+  const ids = records.map(r => r.id);
+  const colSpan = canDelete ? 9 : 7;
+  return <div className="archive-page"><div className="archive-intro"><div><h2>{label}</h2><p>Records move here automatically after their calendar month closes. Archived data stays out of the active workspace.</p></div><div className="archive-meta"><Archive size={18} /><span>{records.length} records</span></div></div><div className="archive-toolbar"><div className="period-tabs">{(["month", "week", "year", "all"] as const).map(v => <button key={v} className={period === v ? "active" : ""} onClick={() => setPeriod(v)}>{v === "all" ? "All" : v[0].toUpperCase() + v.slice(1)}</button>)}</div>{period !== "all" && <DatePicker value={date} onChange={setDate} />}</div>{canDelete && selected.size > 0 && <SelectionBar count={selected.size} busy={bulkBusy} onClear={() => onToggleAll(ids, false)} onDelete={onDeleteSelected} />}<div className="table-card archive-table"><div className="table-wrap"><table><thead><tr>{canDelete && <th className="checkbox-col"><HeaderCheckbox ids={ids} selected={selected} onToggleAll={onToggleAll} /></th>}<th>Type</th><th>Buyer</th><th>Robux</th><th>Status</th><th>Archived</th><th>Added by</th><th>Updated by</th>{canDelete && <th />}</tr></thead><tbody>{records.length === 0 ? <tr><td colSpan={colSpan}><Empty title="Nothing archived here" text="Try another period or wait for the next monthly archive run." /></td></tr> : records.map(record => { const data = record.data as any; return <tr key={record.id} className={selected.has(record.id) ? "row-selected" : ""}>{canDelete && <td className="checkbox-col"><input type="checkbox" className="row-checkbox" checked={selected.has(record.id)} onChange={() => onToggle(record.id)} aria-label={`Select archived record for @${data.buyer_username}`} /></td>}<td><span className="archive-type">{record.record_type === "gamepass" ? "Gamepass" : "Payout"}</span></td><td><strong className="table-buyer">@{data.buyer_username}</strong></td><td><strong className="amount">{money(data.robux_amount)}</strong></td><td><StatusBadge status={data.status} /></td><td className="date-cell">{dateTime(record.archived_at)}</td><td className="actor-cell">{staffLabel(record.created_by_email)}</td><td className="actor-cell">{staffLabel(record.updated_by_email ?? record.created_by_email)}</td>{canDelete && <td><button className="table-delete" title="Permanently delete" onClick={() => onDelete(record.id)}><Trash2 size={15} /></button></td>}</tr>; })}</tbody></table></div></div><div className="archive-note"><ShieldCheck size={15} /><span><b>Retention:</b> archives are kept until an owner permanently deletes them. Deleting an archive record cannot be undone.</span></div></div>;
+}
+
+function SettingsView({ session, role, darkMode, setDarkMode, onRefresh, onSignOut }: { session: Session; role: StaffRole; darkMode: boolean; setDarkMode: (v: boolean) => void; onRefresh: () => void; onSignOut: () => void }) {
+  return <div className="settings-page"><div className="settings-intro"><div><p>Control how this workspace looks and manage your staff session.</p></div></div><div className="settings-grid"><section className="settings-card"><div className="settings-card-head"><div className="settings-icon"><Sun size={17} /></div><div><strong>Appearance</strong><span>Choose your workspace theme.</span></div></div><div className="theme-options"><button className={`theme-option ${!darkMode ? "selected" : ""}`} onClick={() => setDarkMode(false)}><Sun size={17} /><span><b>Light</b><small>Clean white workspace</small></span>{!darkMode && <Check size={16} />}</button><button className={`theme-option ${darkMode ? "selected" : ""}`} onClick={() => setDarkMode(true)}><Moon size={17} /><span><b>Dark</b><small>Low-light workspace</small></span>{darkMode && <Check size={16} />}</button></div></section><section className="settings-card"><div className="settings-card-head"><div className="settings-icon"><ShieldCheck size={17} /></div><div><strong>Staff access</strong><span>Only two fixed staff accounts can access the workspace.</span></div></div><div className="staff-list">
+  <div className="staff-row">
+    <span className="account-avatar">
+      <img src="/owner.jpg" alt="Owner" />
+    </span>
+
+    <div>
+      <strong>Owner</strong>
+      <small>Owner · permanent archive deletion</small>
+    </div>
+  </div>
+
+  <div className="staff-row">
+    <span className="account-avatar">
+      <img src="/admin.jpg" alt="Admin" />
+    </span>
+
+    <div>
+      <strong>Admin</strong>
+      <small>Admin · manage active records</small>
+    </div>
+  </div>
+
+  <div className="current-role">
+    <span>Signed in as</span>
+    <b>{role === "owner" ? "Owner" : "Admin"}</b>
+  </div>
+</div></section><section className="settings-card"><div className="settings-card-head"><div className="settings-icon"><RefreshCw size={17} /></div><div><strong>Workspace actions</strong><span>Useful controls for shared records.</span></div></div><button className="settings-action" onClick={onRefresh}><span><RefreshCw size={16} /><b>Refresh records</b></span><ArrowUpRight size={15} /></button><button className="settings-action danger" onClick={onSignOut}><span><LogOut size={16} /><b>Sign out</b></span><ArrowUpRight size={15} /></button></section><section className="settings-card"><div className="settings-card-head"><div className="settings-icon"><Settings size={17} /></div><div><strong>Workspace</strong><span>Current application information.</span></div></div><div className="info-list"><div><span>Workspace</span><b>Chérie RBX Order Desk</b></div><div><span>Access</span><b>Private staff workspace</b></div><div><span>Data</span><b>Shared through Supabase</b></div></div></section></div></div>;
 }
 
 function Modal({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: ReactNode }) {

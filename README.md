@@ -80,3 +80,14 @@ npm.cmd run dev
 Only use the Supabase **publishable** key in `.env.local`. Never put a Supabase secret/service-role key in this frontend project.
 
 The authenticated staff users share the same Supabase database. RLS allows authenticated staff to read and update the shared records.
+
+## v3 audit + archive setup
+
+Run the complete `supabase/schema.sql` in the Supabase SQL Editor after deploying this version.
+
+- Staff access is restricted to `espantaleonnika6@gmail.com` (Owner) and `nicslibunao@gmail.com` (Admin).
+- `Added by` and `Updated by` are database-managed audit fields. The client cannot choose or overwrite them.
+- The first day of every month, Supabase Cron calls `public.archive_closed_records()` and moves all records from closed calendar months into `archive_records`.
+- The Archive screen can filter by month, week, year, or all history.
+- Permanent archive deletion is owner-only.
+- The archive job uses the Asia/Manila calendar for month boundaries.
