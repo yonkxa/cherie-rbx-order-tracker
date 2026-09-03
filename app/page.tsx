@@ -10,6 +10,7 @@ import {
   ChevronDown,
   CircleDollarSign,
   CalendarDays,
+  Copy,
   ExternalLink,
   Gamepad2,
   Link2,
@@ -17,6 +18,7 @@ import {
   Menu,
   Minus,
   Moon,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -32,9 +34,9 @@ import { supabase } from "@/lib/supabase";
 
 type OrderStatus = "pending" | "processing" | "completed" | "refunded";
 type ProcessType = "fast" | "slow";
-type BuyerSource = "telegram" | "discord";
 type PayoutStatus = OrderStatus;
 type SourceGroup = "A (supp)" | "A (d'isle)" | "B (supp)" | "C (supp)" | "D (supp)" | "E (supp)";
+type BuyerSource = "telegram" | "discord";
 type View = "overview" | "gamepasses" | "payouts" | "archive" | "settings";
 type GamepassLink = { amount: number; link: string };
 
@@ -47,6 +49,32 @@ function staffLabel(email: string | null | undefined) {
   if (!email) return "System";
   const role = STAFF[email.toLowerCase()];
   return role === "owner" ? "Owner" : role === "admin" ? "Admin" : "System";
+}
+
+// Detailed per-staff breakdown, shown on the Overview tab (combined across
+// gamepasses and payouts). Pending + processing are merged into one
+// "processing" bucket to keep this compact.
+type StaffPendingStat = {
+  email: string; label: string; role: StaffRole | undefined;
+  processingRobux: number; completedRobux: number;
+  processingOrders: number; completedOrders: number;
+  totalOrders: number;
+};
+function staffPendingStats(records: { status: OrderStatus; robux_amount: number; created_by_email: string | null }[]): StaffPendingStat[] {
+  const buckets = new Map<string, StaffPendingStat>();
+  [OWNER_EMAIL, ADMIN_EMAIL].forEach(email => buckets.set(email, {
+    email, label: staffLabel(email), role: STAFF[email],
+    processingRobux: 0, completedRobux: 0,
+    processingOrders: 0, completedOrders: 0, totalOrders: 0,
+  }));
+  for (const r of records) {
+    const email = r.created_by_email?.toLowerCase();
+    const bucket = email ? buckets.get(email) : undefined;
+    if (!bucket) continue;
+    if (r.status === "pending" || r.status === "processing") { bucket.processingRobux += r.robux_amount; bucket.processingOrders += 1; bucket.totalOrders += 1; }
+    else if (r.status === "completed") { bucket.completedRobux += r.robux_amount; bucket.completedOrders += 1; bucket.totalOrders += 1; }
+  }
+  return Array.from(buckets.values());
 }
 
 type GamepassOrder = {
@@ -97,6 +125,8 @@ export default function Home() {
   const [archiveDate, setArchiveDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [showGamepassModal, setShowGamepassModal] = useState(false);
   const [showPayoutModal, setShowPayoutModal] = useState(false);
+  const [editingGamepassId, setEditingGamepassId] = useState<string | null>(null);
+  const [editingPayoutId, setEditingPayoutId] = useState<string | null>(null);
   const [darkMode, setDarkMode] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [selectedGamepasses, setSelectedGamepasses] = useState<Set<string>>(new Set());
@@ -158,9 +188,28 @@ export default function Home() {
   async function logout() { await supabase.auth.signOut(); setView("overview"); }
   function go(viewName: View) { setView(viewName); setMobileNavOpen(false); setSearch(""); setSelectedGamepasses(new Set()); setSelectedPayouts(new Set()); setSelectedArchives(new Set()); }
   function resetGamepassForm() { setGamepassForm({ buyer_username: "", buyer_source: "telegram", robux_amount: "", process_type: "slow", status: "pending", notes: "" }); setGamepassLinks([{ amount: 0, link: "" }]); }
-function resetPayoutForm() { setPayoutForm({ buyer_username: "", buyer_source: "telegram", roblox_username: "", robux_amount: "", source_group: "A (supp)", status: "pending", notes: "" }); }
-function openGamepassModal() { resetGamepassForm(); setMessage(""); setShowGamepassModal(true); }
-  function openPayoutModal() { resetPayoutForm(); setMessage(""); setShowPayoutModal(true); }
+  function resetPayoutForm() { setPayoutForm({ buyer_username: "", buyer_source: "telegram", roblox_username: "", robux_amount: "", source_group: "A (supp)", status: "pending", notes: "" }); }
+  function openGamepassModal(order?: GamepassOrder) {
+    if (order) {
+      setEditingGamepassId(order.id);
+      setGamepassForm({ buyer_username: order.buyer_username, buyer_source: order.buyer_source, robux_amount: String(order.robux_amount), process_type: order.process_type, status: order.status, notes: order.notes ?? "" });
+      setGamepassLinks(parseGamepassLinks(order).map(l => ({ ...l })));
+    } else {
+      setEditingGamepassId(null);
+      resetGamepassForm();
+    }
+    setMessage(""); setShowGamepassModal(true);
+  }
+  function openPayoutModal(payout?: RobuxPayout) {
+    if (payout) {
+      setEditingPayoutId(payout.id);
+      setPayoutForm({ buyer_username: payout.buyer_username, buyer_source: payout.buyer_source, roblox_username: payout.roblox_username, robux_amount: String(payout.robux_amount), source_group: payout.source_group, status: payout.status, notes: payout.notes ?? "" });
+    } else {
+      setEditingPayoutId(null);
+      resetPayoutForm();
+    }
+    setMessage(""); setShowPayoutModal(true);
+  }
   function addGamepassLine() { setGamepassLinks(items => [...items, { amount: 0, link: "" }]); }
   function removeGamepassLine(index: number) { setGamepassLinks(items => items.length === 1 ? items : items.filter((_, i) => i !== index)); }
   function updateGamepassLine(index: number, key: keyof GamepassLink, value: string) {
@@ -178,9 +227,12 @@ function openGamepassModal() { resetGamepassForm(); setMessage(""); setShowGamep
     if (links.some(item => !item.link)) return setMessage("Add a link for every gamepass.");
     if (links.some(item => !/^https?:\/\//i.test(item.link))) return setMessage("Each gamepass link must start with http:// or https://.");
     if (splitTotal !== amount) return setMessage(`The gamepass split totals ${money(splitTotal)}, but the order is ${money(amount)}.`);
-    const { error } = await supabase.from("orders").insert({ robux_amount: amount, process_type: gamepassForm.process_type, gamepass_link: links[0].link, gamepass_links: links, buyer_username: cleanUsername(gamepassForm.buyer_username), buyer_source: gamepassForm.buyer_source, status: gamepassForm.status, notes: gamepassForm.notes.trim() || null });
+    const payload = { robux_amount: amount, process_type: gamepassForm.process_type, gamepass_link: links[0].link, gamepass_links: links, buyer_username: cleanUsername(gamepassForm.buyer_username), buyer_source: gamepassForm.buyer_source, status: gamepassForm.status, notes: gamepassForm.notes.trim() || null };
+    const { error } = editingGamepassId
+      ? await supabase.from("orders").update(payload).eq("id", editingGamepassId)
+      : await supabase.from("orders").insert(payload);
     if (error) return setMessage(error.message);
-    setShowGamepassModal(false); await loadAll();
+    setShowGamepassModal(false); setEditingGamepassId(null); await loadAll();
   }
 
   async function addPayout(e: FormEvent) {
@@ -189,9 +241,12 @@ function openGamepassModal() { resetGamepassForm(); setMessage(""); setShowGamep
     if (!amount || amount <= 0) return setMessage("Enter a valid Robux amount.");
     if (!payoutForm.buyer_username.trim()) return setMessage("Add the buyer username.");
     if (!payoutForm.roblox_username.trim()) return setMessage("Add the Roblox recipient username.");
-    const { error } = await supabase.from("robux_payouts").insert({ buyer_username: cleanUsername(payoutForm.buyer_username), buyer_source: payoutForm.buyer_source, roblox_username: cleanUsername(payoutForm.roblox_username), robux_amount: amount, source_group: payoutForm.source_group, status: payoutForm.status, notes: payoutForm.notes.trim() || null });
+    const payload = { buyer_username: cleanUsername(payoutForm.buyer_username), buyer_source: payoutForm.buyer_source, roblox_username: cleanUsername(payoutForm.roblox_username), robux_amount: amount, source_group: payoutForm.source_group, status: payoutForm.status, notes: payoutForm.notes.trim() || null };
+    const { error } = editingPayoutId
+      ? await supabase.from("robux_payouts").update(payload).eq("id", editingPayoutId)
+      : await supabase.from("robux_payouts").insert(payload);
     if (error) return setMessage(error.message);
-    setShowPayoutModal(false); await loadAll();
+    setShowPayoutModal(false); setEditingPayoutId(null); await loadAll();
   }
 
   async function updateGamepassStatus(id: string, status: OrderStatus) {
@@ -282,6 +337,8 @@ function openGamepassModal() { resetGamepassForm(); setMessage(""); setShowGamep
   const processingPayouts = payouts.filter(o => o.status === "processing").reduce((s, o) => s + o.robux_amount, 0);
   const completedGamepasses = gamepasses.filter(o => o.status === "completed").reduce((s, o) => s + o.robux_amount, 0);
   const completedPayouts = payouts.filter(o => o.status === "completed").reduce((s, o) => s + o.robux_amount, 0);
+  const totalPendingRobux = pendingGamepasses + processingGamepasses + pendingPayouts + processingPayouts;
+  const totalPendingRecords = gamepasses.filter(o => o.status === "pending" || o.status === "processing").length + payouts.filter(o => o.status === "pending" || o.status === "processing").length;
 
   const visibleGamepasses = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -332,7 +389,8 @@ function openGamepassModal() { resetGamepassForm(); setMessage(""); setShowGamep
 
   return (
     <main className="app-shell">
-      <header className="topbar">
+      <CustomCursor />
+      {!(showGamepassModal || showPayoutModal) && <header className="topbar">
         <div className="topbar-left">
           <button className="mobile-menu-btn icon-btn" type="button" onClick={() => setMobileNavOpen(v => !v)} aria-label="Open navigation"><Menu size={18} /></button>
           <Logo className="brand-logo" />
@@ -353,7 +411,7 @@ function openGamepassModal() { resetGamepassForm(); setMessage(""); setShowGamep
   />
 </span><span className="account-email">{currentRole === "owner" ? "Owner" : currentRole === "admin" ? "Admin" : "Unauthorized"}</span><ChevronDown size={14} /></button>
         </div>
-      </header>
+      </header>}
 
       {mobileNavOpen && <button className="mobile-nav-overlay" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
       <div className="workspace">
@@ -368,44 +426,42 @@ function openGamepassModal() { resetGamepassForm(); setMessage(""); setShowGamep
           <div className="sidebar-section-label">Manage</div>
           <NavButton active={view === "settings"} icon={<Settings size={16} />} onClick={() => go("settings")}>Settings</NavButton>
           <div className="sidebar-spacer" />
-          <button className="sidebar-add" onClick={openGamepassModal}><Plus size={15} /> New gamepass order</button>
-          <button className="sidebar-add" onClick={openPayoutModal}><Plus size={15} /> New Robux payout</button>
+          <button className="sidebar-add" onClick={() => openGamepassModal()}><Plus size={15} /> New gamepass order</button>
+          <button className="sidebar-add" onClick={() => openPayoutModal()}><Plus size={15} /> New Robux payout</button>
           <button className="sidebar-logout" onClick={logout}><LogOut size={15} /> Sign out</button>
         </aside>
 
         <section className="content">
           <div className="page-heading">
             <div className="page-title-block"><span className="page-kicker">CHÉRIE ORDER DESK</span><h1>{activeTitle}</h1></div>
-            {view === "gamepasses" && <button className="primary-btn" onClick={openGamepassModal}><Plus size={16} /> New order</button>}
-            {view === "payouts" && <button className="primary-btn" onClick={openPayoutModal}><Plus size={16} /> New payout</button>}
+            {view === "gamepasses" && <button className="primary-btn" onClick={() => openGamepassModal()}><Plus size={16} /> New order</button>}
+            {view === "payouts" && <button className="primary-btn" onClick={() => openPayoutModal()}><Plus size={16} /> New payout</button>}
           </div>
           {message && <div className="notice"><span>{message}</span><button onClick={() => setMessage("")} aria-label="Dismiss"><X size={15} /></button></div>}
 
-          {view === "overview" && <Overview gamepasses={gamepasses} payouts={payouts} pendingGamepasses={pendingGamepasses} processingGamepasses={processingGamepasses} pendingPayouts={pendingPayouts} processingPayouts={processingPayouts} completedGamepasses={completedGamepasses} completedPayouts={completedPayouts} onGamepasses={() => go("gamepasses")} onPayouts={() => go("payouts")} />}
+          {view === "overview" && <Overview gamepasses={gamepasses} payouts={payouts} pendingGamepasses={pendingGamepasses} processingGamepasses={processingGamepasses} pendingPayouts={pendingPayouts} processingPayouts={processingPayouts} completedGamepasses={completedGamepasses} completedPayouts={completedPayouts} role={currentRole} onGamepasses={() => go("gamepasses")} onPayouts={() => go("payouts")} />}
           {view === "gamepasses" && <>
-            <div className="summary-row"><Summary label="Pending" value={money(pendingGamepasses)} detail="Not yet sent to supp" tone="amber" /><Summary label="Processing" value={money(processingGamepasses)} detail="Already sent to supp" tone="blue" /><Summary label="Completed" value={money(completedGamepasses)} detail="Gamepass already bought" tone="green" /><Summary label="Orders" value={String(gamepasses.length)} detail="All gamepass records" tone="neutral" /></div>
+            <div className="summary-row"><Summary label="Processing" value={money(pendingGamepasses + processingGamepasses)} detail="Pending + sent to supp" tone="blue" /><Summary label="Completed" value={money(completedGamepasses)} detail="Gamepass already bought" tone="green" /><Summary label="Orders" value={String(gamepasses.length)} detail="All gamepass records" tone="neutral" /></div>
             <Toolbar search={search} setSearch={setSearch} statusFilter={statusFilter} setStatusFilter={setStatusFilter} thirdLabel="Process" thirdValue={processFilter} thirdOptions={["all", "fast", "slow"]} setThirdValue={v => setProcessFilter(v as "all" | ProcessType)} />
             {selectedGamepasses.size > 0 && <SelectionBar count={selectedGamepasses.size} busy={bulkBusy} onClear={() => setSelectedGamepasses(new Set())} onArchive={() => requestConfirm({ title: "Archive selected orders?", message: `Archive ${selectedGamepasses.size} gamepass order(s) now? They'll move to the Archive tab.`, confirmLabel: "Archive", action: archiveSelectedGamepasses })} onDelete={() => requestConfirm({ title: "Delete selected orders?", message: `Permanently delete ${selectedGamepasses.size} gamepass order(s)? This cannot be undone.`, confirmLabel: "Delete", danger: true, action: deleteSelectedGamepasses })} />}
-            <GamepassTable orders={visibleGamepasses} loading={loading} onStatus={updateGamepassStatus} selected={selectedGamepasses} onToggle={toggleGamepassSelected} onToggleAll={toggleAllGamepasses} />
+            <GamepassTable orders={visibleGamepasses} loading={loading} onStatus={updateGamepassStatus} onEdit={openGamepassModal} selected={selectedGamepasses} onToggle={toggleGamepassSelected} onToggleAll={toggleAllGamepasses} />
           </>}
           {view === "payouts" && <>
-            <div className="summary-row"><Summary label="Pending" value={money(pendingPayouts)} detail="Not yet sent" tone="amber" /><Summary label="Processing" value={money(processingPayouts)} detail="Already sent" tone="blue" /><Summary label="Completed" value={money(completedPayouts)} detail="Robux sent" tone="green" /><Summary label="Payouts" value={String(payouts.length)} detail="All payout records" tone="neutral" /></div>
+            <div className="summary-row"><Summary label="Processing" value={money(pendingPayouts + processingPayouts)} detail="Pending + already sent" tone="blue" /><Summary label="Completed" value={money(completedPayouts)} detail="Robux sent" tone="green" /><Summary label="Payouts" value={String(payouts.length)} detail="All payout records" tone="neutral" /></div>
             <Toolbar search={search} setSearch={setSearch} statusFilter={statusFilter} setStatusFilter={setStatusFilter} thirdLabel="Group" thirdValue={groupFilter} thirdOptions={["all", ...GROUPS]} setThirdValue={v => setGroupFilter(v as "all" | SourceGroup)} />
             {selectedPayouts.size > 0 && <SelectionBar count={selectedPayouts.size} busy={bulkBusy} onClear={() => setSelectedPayouts(new Set())} onArchive={() => requestConfirm({ title: "Archive selected payouts?", message: `Archive ${selectedPayouts.size} Robux payout(s) now? They'll move to the Archive tab.`, confirmLabel: "Archive", action: archiveSelectedPayouts })} onDelete={() => requestConfirm({ title: "Delete selected payouts?", message: `Permanently delete ${selectedPayouts.size} Robux payout(s)? This cannot be undone.`, confirmLabel: "Delete", danger: true, action: deleteSelectedPayouts })} />}
-            <PayoutTable payouts={visiblePayouts} loading={loading} onStatus={updatePayoutStatus} selected={selectedPayouts} onToggle={togglePayoutSelected} onToggleAll={toggleAllPayouts} />
+            <PayoutTable payouts={visiblePayouts} loading={loading} onStatus={updatePayoutStatus} onEdit={openPayoutModal} selected={selectedPayouts} onToggle={togglePayoutSelected} onToggleAll={toggleAllPayouts} />
           </>}
           {view === "archive" && <ArchiveView records={visibleArchives} period={archivePeriod} setPeriod={setArchivePeriod} date={archiveDate} setDate={setArchiveDate} canDelete={currentRole === "owner"} onDelete={deleteArchive} selected={selectedArchives} onToggle={toggleArchiveSelected} onToggleAll={toggleAllArchives} bulkBusy={bulkBusy} onDeleteSelected={() => requestConfirm({ title: "Delete archived records?", message: `Permanently delete ${selectedArchives.size} archived record(s)? This cannot be undone.`, confirmLabel: "Delete", danger: true, action: deleteSelectedArchives })} />}
           {view === "settings" && <SettingsView session={session} role={currentRole} darkMode={darkMode} setDarkMode={setDarkMode} onRefresh={loadAll} onSignOut={logout} />}
         </section>
       </div>
-      <footer><span>Chérie Order Desk</span><span>Private staff workspace · Supabase authenticated</span></footer>
 
-      {showGamepassModal && <Modal title="New gamepass order" subtitle="Add one or more gamepasses to this order." onClose={() => setShowGamepassModal(false)}>
+      {showGamepassModal && <Modal title={editingGamepassId ? "Edit gamepass order" : "New gamepass order"} subtitle={editingGamepassId ? "Update the details of this order." : "Add one or more gamepasses to this order."} onClose={() => { setShowGamepassModal(false); setEditingGamepassId(null); }}>
         <form onSubmit={addGamepass} className="form-grid">
           <Field label="Buyer username"><input value={gamepassForm.buyer_username} onChange={e => setGamepassForm({ ...gamepassForm, buyer_username: e.target.value })} placeholder="@username" required /></Field>
-<Field label="Buyer source"><Dropdown value={gamepassForm.buyer_source} onChange={v => setGamepassForm({ ...gamepassForm, buyer_source: v as BuyerSource })} options={[{ value: "telegram", label: "Telegram" }, { value: "discord", label: "Discord" }]} /></Field>
-<Field label="Total Robux">
-  <input inputMode="numeric" value={gamepassForm.robux_amount} onChange={e => setGamepassForm({ ...gamepassForm, robux_amount: e.target.value })} placeholder="10,000" required /></Field>
+          <Field label="Buyer source"><Dropdown value={gamepassForm.buyer_source} onChange={v => setGamepassForm({ ...gamepassForm, buyer_source: v as BuyerSource })} options={[{ value: "telegram", label: "Telegram" }, { value: "discord", label: "Discord" }]} /></Field>
+          <Field label="Total Robux"><input inputMode="numeric" value={gamepassForm.robux_amount} onChange={e => setGamepassForm({ ...gamepassForm, robux_amount: e.target.value })} placeholder="10,000" required /></Field>
           <Field label="Process"><Dropdown value={gamepassForm.process_type} onChange={v => setGamepassForm({ ...gamepassForm, process_type: v as ProcessType })} options={[{ value: "fast", label: "Fast", hint: "Priority processing" }, { value: "slow", label: "Slow", hint: "Regular processing" }]} /></Field>
           <Field label="Status"><Dropdown value={gamepassForm.status} onChange={v => setGamepassForm({ ...gamepassForm, status: v as OrderStatus })} options={STATUSES.map(s => ({ value: s, label: statusLabel(s) }))} /></Field>
           <div className="field-span gamepass-lines">
@@ -415,19 +471,19 @@ function openGamepassModal() { resetGamepassForm(); setMessage(""); setShowGamep
             <div className="split-hint"><Link2 size={13} /> Example: 10,000 total → 5,000 + 3,000 + 2,000</div>
           </div>
           <div className="field-span"><Field label="Notes"><textarea rows={3} value={gamepassForm.notes} onChange={e => setGamepassForm({ ...gamepassForm, notes: e.target.value })} placeholder="Optional note for staff" /></Field></div>
-          <div className="form-actions field-span"><button type="button" className="secondary-btn" onClick={() => setShowGamepassModal(false)}>Cancel</button><button type="submit" className="primary-btn"><Check size={16} /> Create order</button></div>
+          <div className="form-actions field-span"><button type="button" className="secondary-btn" onClick={() => { setShowGamepassModal(false); setEditingGamepassId(null); }}>Cancel</button><button type="submit" className="primary-btn"><Check size={16} /> {editingGamepassId ? "Save changes" : "Create order"}</button></div>
         </form>
       </Modal>}
-      {showPayoutModal && <Modal title="New Robux payout" subtitle="Record where the Robux should actually be sent." onClose={() => setShowPayoutModal(false)}>
+      {showPayoutModal && <Modal title={editingPayoutId ? "Edit Robux payout" : "New Robux payout"} subtitle={editingPayoutId ? "Update the details of this payout." : "Record where the Robux should actually be sent."} onClose={() => { setShowPayoutModal(false); setEditingPayoutId(null); }}>
         <form onSubmit={addPayout} className="form-grid">
           <Field label="Buyer username"><input value={payoutForm.buyer_username} onChange={e => setPayoutForm({ ...payoutForm, buyer_username: e.target.value })} placeholder="@buyer" required /></Field>
-<Field label="Buyer source"><Dropdown value={payoutForm.buyer_source} onChange={v => setPayoutForm({ ...payoutForm, buyer_source: v as BuyerSource })} options={[{ value: "telegram", label: "Telegram" }, { value: "discord", label: "Discord" }]} /></Field>
-<Field label="Roblox recipient username"><input value={payoutForm.roblox_username} onChange={e => setPayoutForm({ ...payoutForm, roblox_username: e.target.value })} placeholder="@recipient" required /></Field>
+          <Field label="Buyer source"><Dropdown value={payoutForm.buyer_source} onChange={v => setPayoutForm({ ...payoutForm, buyer_source: v as BuyerSource })} options={[{ value: "telegram", label: "Telegram" }, { value: "discord", label: "Discord" }]} /></Field>
+          <Field label="Roblox recipient username"><input value={payoutForm.roblox_username} onChange={e => setPayoutForm({ ...payoutForm, roblox_username: e.target.value })} placeholder="@recipient" required /></Field>
           <Field label="Amount of Robux"><input inputMode="numeric" value={payoutForm.robux_amount} onChange={e => setPayoutForm({ ...payoutForm, robux_amount: e.target.value })} placeholder="10,000" required /></Field>
           <Field label="From which group"><Dropdown value={payoutForm.source_group} onChange={v => setPayoutForm({ ...payoutForm, source_group: v as SourceGroup })} options={GROUPS.map(g => ({ value: g, label: g }))} /></Field>
           <Field label="Status"><Dropdown value={payoutForm.status} onChange={v => setPayoutForm({ ...payoutForm, status: v as PayoutStatus })} options={STATUSES.map(s => ({ value: s, label: statusLabel(s) }))} /></Field>
           <div className="field-span"><Field label="Notes"><textarea rows={3} value={payoutForm.notes} onChange={e => setPayoutForm({ ...payoutForm, notes: e.target.value })} placeholder="Optional note for staff" /></Field></div>
-          <div className="form-actions field-span"><button type="button" className="secondary-btn" onClick={() => setShowPayoutModal(false)}>Cancel</button><button type="submit" className="primary-btn"><Check size={16} /> Create payout</button></div>
+          <div className="form-actions field-span"><button type="button" className="secondary-btn" onClick={() => { setShowPayoutModal(false); setEditingPayoutId(null); }}>Cancel</button><button type="submit" className="primary-btn"><Check size={16} /> {editingPayoutId ? "Save changes" : "Create payout"}</button></div>
         </form>
       </Modal>}
       {confirmDialog && <ConfirmDialog {...confirmDialog} busy={confirmBusy} onConfirm={runConfirmDialog} onCancel={() => setConfirmDialog(null)} />}
@@ -538,11 +594,74 @@ function DatePicker({ value, onChange, className = "" }: { value: string; onChan
 function NavButton({ active, icon, children, onClick }: { active: boolean; icon: ReactNode; children: ReactNode; onClick: () => void }) { return <button className={`nav-btn ${active ? "active" : ""}`} onClick={onClick}>{icon}<span className="nav-content">{children}</span></button>; }
 function Summary({ label, value, detail, tone }: { label: string; value: string; detail: string; tone: string }) { return <div className={`summary-card ${tone}`}><div className="summary-mark" /><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>; }
 
-function Overview(props: { gamepasses: GamepassOrder[]; payouts: RobuxPayout[]; pendingGamepasses: number; processingGamepasses: number; pendingPayouts: number; processingPayouts: number; completedGamepasses: number; completedPayouts: number; onGamepasses: () => void; onPayouts: () => void }) {
-  const activity = [...props.gamepasses.map(o => ({ id: `g-${o.id}`, type: "Gamepass", buyer: o.buyer_username, amount: o.robux_amount, status: o.status, date: o.created_at })), ...props.payouts.map(o => ({ id: `p-${o.id}`, type: "Payout", buyer: o.buyer_username, amount: o.robux_amount, status: o.status, date: o.created_at }))].sort((a, b) => +new Date(b.date) - +new Date(a.date)).slice(0, 8);
-  return <><div className="hero-panel"><div><span className="eyebrow">TODAY</span><h2>Keep every order moving.</h2><p>See what is waiting, what has already been sent to the supplier, and what your staff has completed.</p></div><div className="hero-actions"><button className="secondary-btn" onClick={props.onGamepasses}><Gamepad2 size={16} /> Gamepass orders</button><button className="secondary-btn" onClick={props.onPayouts}><WalletCards size={16} /> Robux payouts</button></div></div><div className="overview-grid"><OverviewCard icon={<Gamepad2 size={18} />} label="Gamepass outstanding" value={money(props.pendingGamepasses + props.processingGamepasses)} detail={`${money(props.pendingGamepasses)} pending · ${money(props.processingGamepasses)} processing`} /><OverviewCard icon={<CircleDollarSign size={18} />} label="Robux payout outstanding" value={money(props.pendingPayouts + props.processingPayouts)} detail={`${money(props.pendingPayouts)} pending · ${money(props.processingPayouts)} processing`} /><OverviewCard icon={<Check size={18} />} label="Completed" value={money(props.completedGamepasses + props.completedPayouts)} detail={`${money(props.completedGamepasses)} gamepasses · ${money(props.completedPayouts)} payouts`} /><OverviewCard icon={<Users size={18} />} label="Total records" value={String(props.gamepasses.length + props.payouts.length)} detail={`${props.gamepasses.length} gamepasses · ${props.payouts.length} payouts`} /></div><div className="activity-card"><div className="section-title"><div><span className="eyebrow">RECENT ACTIVITY</span><h2>Latest records</h2></div></div>{activity.length === 0 ? <Empty title="No records yet" text="Your newest orders and payouts will appear here." /> : <div className="activity-list">{activity.map(item => <div className="activity-item" key={item.id}><div className="activity-dot" /><div className="activity-main"><strong>@{item.buyer}</strong><span>{item.type} · {dateTime(item.date)}</span></div><div className="activity-amount">{money(item.amount)}</div><StatusBadge status={item.status} /></div>)}</div>}</div></>;
+function StaffDetailCard({ stat }: { stat: StaffPendingStat }) {
+  const lifetime = stat.processingRobux + stat.completedRobux;
+  const completedShare = lifetime > 0 ? Math.round((stat.completedRobux / lifetime) * 100) : 0;
+  const avatarSrc = stat.email === OWNER_EMAIL ? "/owner.jpg" : "/admin.jpg";
+  return (
+    <div className={`staff-card-v2 ${stat.role ?? ""}`}>
+      <div className="staff-card-v2-top">
+        <span className="staff-card-v2-avatar"><img src={avatarSrc} alt={stat.label} /></span>
+        <span className={`staff-role-tag ${stat.role ?? ""}`}>{stat.role === "owner" ? "Owner" : "Admin"}</span>
+      </div>
+      <strong className="staff-card-v2-name">{stat.label}</strong>
+      <span className="staff-card-v2-sub">{stat.totalOrders} record{stat.totalOrders === 1 ? "" : "s"} total</span>
+      <div className="staff-card-v2-metrics">
+        <div className="staff-metric blue"><span>Processing</span><strong>{money(stat.processingRobux)}</strong><small>{stat.processingOrders} record{stat.processingOrders === 1 ? "" : "s"}</small></div>
+        <div className="staff-metric green"><span>Completed</span><strong>{money(stat.completedRobux)}</strong><small>{stat.completedOrders} record{stat.completedOrders === 1 ? "" : "s"}</small></div>
+      </div>
+      <div className="staff-progress">
+        <div className="staff-progress-track"><div className="staff-progress-fill" style={{ width: `${completedShare}%` }} /></div>
+        <span className="staff-progress-label">{completedShare}%</span>
+      </div>
+    </div>
+  );
 }
-function OverviewCard({ icon, label, value, detail }: { icon: ReactNode; label: string; value: string; detail: string }) { return <div className="overview-card"><div className="card-icon">{icon}</div><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></div>; }
+
+function Overview(props: { gamepasses: GamepassOrder[]; payouts: RobuxPayout[]; pendingGamepasses: number; processingGamepasses: number; pendingPayouts: number; processingPayouts: number; completedGamepasses: number; completedPayouts: number; role: StaffRole | undefined; onGamepasses: () => void; onPayouts: () => void }) {
+  const activity = [...props.gamepasses.map(o => ({ id: `g-${o.id}`, type: "Gamepass", buyer: o.buyer_username, amount: o.robux_amount, status: o.status, date: o.created_at })), ...props.payouts.map(o => ({ id: `p-${o.id}`, type: "Payout", buyer: o.buyer_username, amount: o.robux_amount, status: o.status, date: o.created_at }))].sort((a, b) => +new Date(b.date) - +new Date(a.date)).slice(0, 8);
+  const combinedStats = staffPendingStats([...props.gamepasses, ...props.payouts]);
+  const gamepassOutstanding = props.pendingGamepasses + props.processingGamepasses;
+  const payoutOutstanding = props.pendingPayouts + props.processingPayouts;
+  const totalOutstanding = gamepassOutstanding + payoutOutstanding;
+  const totalCompleted = props.completedGamepasses + props.completedPayouts;
+  const totalRecords = props.gamepasses.length + props.payouts.length;
+  const isOwner = props.role === "owner";
+
+  return <>
+    <div className="overview-hero-v2">
+      <span className="hero-glow" aria-hidden="true" />
+      <div className="overview-hero-v2-main">
+        <span className="role-pill">{isOwner ? <ShieldCheck size={13} /> : <Users size={13} />} {isOwner ? "Owner view" : "Admin view"}</span>
+        <h2>{isOwner ? "The whole desk, at a glance." : "Here's what needs your attention."}</h2>
+        <p>{isOwner
+          ? "Every gamepass order and Robux payout across both staff accounts, plus full archive and deletion control."
+          : "Your processing work, side by side with the rest of the team's."}</p>
+      </div>
+      <div className="overview-hero-v2-actions">
+        <button className="secondary-btn" onClick={props.onGamepasses}><Gamepad2 size={16} /> Gamepass orders</button>
+        <button className="secondary-btn" onClick={props.onPayouts}><WalletCards size={16} /> Robux payouts</button>
+      </div>
+    </div>
+
+    <div className="section-title flush"><div><span className="eyebrow">STAFF BREAKDOWN</span><h2>Owner &amp; Admin workload</h2></div></div>
+    <div className="staff-card-grid">{combinedStats.map(s => <StaffDetailCard key={s.email} stat={s} />)}</div>
+
+    <div className="overview-totals">
+      <div className="overview-total-chip"><span className="overview-total-icon amber"><Gamepad2 size={14} /></span><div><span>Gamepass processing</span><strong>{money(gamepassOutstanding)}</strong></div></div>
+      <div className="overview-total-chip"><span className="overview-total-icon green"><Check size={14} /></span><div><span>Gamepass completed</span><strong>{money(props.completedGamepasses)}</strong></div></div>
+      <div className="overview-total-chip"><span className="overview-total-icon blue"><WalletCards size={14} /></span><div><span>Payout processing</span><strong>{money(payoutOutstanding)}</strong></div></div>
+      <div className="overview-total-chip"><span className="overview-total-icon green"><Check size={14} /></span><div><span>Payout completed</span><strong>{money(props.completedPayouts)}</strong></div></div>
+      <div className="overview-total-chip highlight"><span className="overview-total-icon"><CircleDollarSign size={14} /></span><div><span>Total outstanding</span><strong>{money(totalOutstanding)}</strong></div></div>
+      <div className="overview-total-chip highlight"><span className="overview-total-icon"><Users size={14} /></span><div><span>Total records</span><strong>{totalRecords}</strong></div></div>
+    </div>
+
+    <div className="activity-card">
+      <div className="section-title"><div><span className="eyebrow">RECENT ACTIVITY</span><h2>Latest records</h2></div></div>
+      {activity.length === 0 ? <Empty title="No records yet" text="Your newest orders and payouts will appear here." /> : <div className="activity-list">{activity.map(item => <div className="activity-item" key={item.id}><div className="activity-dot" /><div className="activity-main"><strong>@{item.buyer}</strong><span>{item.type} · {dateTime(item.date)}</span></div><div className="activity-amount">{money(item.amount)}</div><StatusBadge status={item.status} /></div>)}</div>}
+    </div>
+  </>;
+}
 
 function Toolbar({ search, setSearch, statusFilter, setStatusFilter, thirdLabel, thirdValue, thirdOptions, setThirdValue }: { search: string; setSearch: (value: string) => void; statusFilter: "all" | OrderStatus; setStatusFilter: (value: "all" | OrderStatus) => void; thirdLabel: string; thirdValue: string; thirdOptions: string[]; setThirdValue: (value: string) => void }) {
   const label = (value: string) => value === "all" ? "All" : value === "fast" ? "Fast" : value === "slow" ? "Slow" : value;
@@ -574,21 +693,47 @@ function HeaderCheckbox({ ids, selected, onToggleAll }: { ids: string[]; selecte
   return <input ref={ref} type="checkbox" className="row-checkbox" checked={allSelected} onChange={e => onToggleAll(ids, e.target.checked)} aria-label="Select all rows" />;
 }
 
-function GamepassTable({ orders, loading, onStatus, selected, onToggle, onToggleAll }: { orders: GamepassOrder[]; loading: boolean; onStatus: (id: string, status: OrderStatus) => void; selected: Set<string>; onToggle: (id: string) => void; onToggleAll: (ids: string[], checked: boolean) => void }) {
+function GamepassTable({ orders, loading, onStatus, onEdit, selected, onToggle, onToggleAll }: { orders: GamepassOrder[]; loading: boolean; onStatus: (id: string, status: OrderStatus) => void; onEdit: (order: GamepassOrder) => void; selected: Set<string>; onToggle: (id: string) => void; onToggleAll: (ids: string[], checked: boolean) => void }) {
   const ids = orders.map(o => o.id);
-  return <><div className="table-card desktop-table"><div className="table-wrap"><table><thead><tr><th className="checkbox-col"><HeaderCheckbox ids={ids} selected={selected} onToggleAll={onToggleAll} /></th><th>Buyer</th><th>Robux</th><th>Process</th><th>Gamepass links</th><th>Status</th><th>Added</th><th>Added by</th><th>Updated by</th></tr></thead><tbody>{loading ? <tr><td colSpan={9}><div className="table-empty">Loading records...</div></td></tr> : orders.length === 0 ? <tr><td colSpan={9}><Empty title="No gamepass orders" text="Try changing your filters or add a new order." /></td></tr> : orders.map(o => <tr key={o.id} className={selected.has(o.id) ? "row-selected" : ""}><td className="checkbox-col"><input type="checkbox" className="row-checkbox" checked={selected.has(o.id)} onChange={() => onToggle(o.id)} aria-label={`Select order from @${o.buyer_username}`} /></td><td><strong className="table-buyer">@{o.buyer_username}</strong><small className="table-note">{o.buyer_source === "discord" ? "Discord" : "Telegram"}</small>{o.notes && <small className="table-note">{o.notes}</small>}</td><td><strong className="amount">{money(o.robux_amount)}</strong></td><td><span className={`process-chip ${o.process_type}`}>{o.process_type}</span></td><td><GamepassLinks order={o} /></td><td><StatusSelect status={o.status} onChange={v => onStatus(o.id, v)} /></td><td className="date-cell">{dateTime(o.created_at)}</td><td className="actor-cell">{staffLabel(o.created_by_email)}</td><td className="actor-cell">{staffLabel(o.updated_by_email ?? o.created_by_email)}</td></tr>)}</tbody></table></div></div><div className="mobile-record-list">{loading ? <div className="mobile-empty">Loading records...</div> : orders.length === 0 ? <Empty title="No gamepass orders" text="Try changing your filters or add a new order." /> : orders.map(o => <GamepassMobileCard key={o.id} order={o} onStatus={onStatus} selected={selected.has(o.id)} onToggle={() => onToggle(o.id)} />)}</div></>;
+  return <><div className="table-card desktop-table"><div className="table-wrap"><table><thead><tr><th className="checkbox-col"><HeaderCheckbox ids={ids} selected={selected} onToggleAll={onToggleAll} /></th><th>Buyer</th><th>Robux</th><th>Process</th><th>Gamepass links</th><th>Status</th><th>Added</th><th>Added by</th><th>Updated by</th><th /></tr></thead><tbody>{loading ? <tr><td colSpan={10}><div className="table-empty">Loading records...</div></td></tr> : orders.length === 0 ? <tr><td colSpan={10}><Empty title="No gamepass orders" text="Try changing your filters or add a new order." /></td></tr> : orders.map(o => <tr key={o.id} className={selected.has(o.id) ? "row-selected" : ""}><td className="checkbox-col"><input type="checkbox" className="row-checkbox" checked={selected.has(o.id)} onChange={() => onToggle(o.id)} aria-label={`Select order from @${o.buyer_username}`} /></td><td><strong className="table-buyer"><CopyableText text={`@${o.buyer_username}`} /></strong><small className="table-note">{o.buyer_source === "discord" ? "Discord" : "Telegram"}</small>{o.notes && <small className="table-note">{o.notes}</small>}</td><td><strong className="amount">{money(o.robux_amount)}</strong></td><td><span className={`process-chip ${o.process_type}`}>{o.process_type}</span></td><td><GamepassLinks order={o} /></td><td><StatusSelect status={o.status} onChange={v => onStatus(o.id, v)} /></td><td className="date-cell">{dateTime(o.created_at)}</td><td className="actor-cell">{staffLabel(o.created_by_email)}</td><td className="actor-cell">{staffLabel(o.updated_by_email ?? o.created_by_email)}</td><td><button className="row-edit" title="Edit order" onClick={() => onEdit(o)}><Pencil size={14} /></button></td></tr>)}</tbody></table></div></div><div className="mobile-record-list">{loading ? <div className="mobile-empty">Loading records...</div> : orders.length === 0 ? <Empty title="No gamepass orders" text="Try changing your filters or add a new order." /> : orders.map(o => <GamepassMobileCard key={o.id} order={o} onStatus={onStatus} onEdit={onEdit} selected={selected.has(o.id)} onToggle={() => onToggle(o.id)} />)}</div></>;
 }
 function GamepassLinks({ order }: { order: GamepassOrder }) {
   const links = parseGamepassLinks(order);
-  return <div className="links-list">{links.map((item, index) => <a key={`${item.link}-${index}`} className="link-row" href={item.link} target="_blank" rel="noreferrer"><span className="link-index">{index + 1}</span><span className="link-copy"><strong>{money(item.amount)}</strong><span>{item.link}</span></span><ExternalLink size={14} /></a>)}</div>;
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  function copyLink(index: number, link: string) {
+    navigator.clipboard?.writeText(link).then(() => {
+      setCopiedIndex(index);
+      window.setTimeout(() => setCopiedIndex(i => (i === index ? null : i)), 1400);
+    });
+  }
+  return <div className="links-list">{links.map((item, index) => <div key={`${item.link}-${index}`} className="link-row"><span className="link-index">{index + 1}</span><span className="link-copy"><strong>{money(item.amount)}</strong><span>{item.link}</span></span><button type="button" className="link-action" onClick={() => copyLink(index, item.link)} title="Copy link">{copiedIndex === index ? <Check size={14} /> : <Copy size={14} />}</button><a className="link-action" href={item.link} target="_blank" rel="noreferrer" title="Open link"><ExternalLink size={14} /></a></div>)}</div>;
 }
-function GamepassMobileCard({ order, onStatus, selected, onToggle }: { order: GamepassOrder; onStatus: (id: string, status: OrderStatus) => void; selected: boolean; onToggle: () => void }) { return <article className={`record-card ${selected ? "row-selected" : ""}`}><div className="record-card-head"><label className="record-select"><input type="checkbox" className="row-checkbox" checked={selected} onChange={onToggle} aria-label={`Select order from @${order.buyer_username}`} /><div><strong>@{order.buyer_username}</strong><span>{order.buyer_source === "discord" ? "Discord" : "Telegram"} · {dateTime(order.created_at)}</span></div></label><StatusSelect status={order.status} onChange={v => onStatus(order.id, v)} /></div><div className="record-meta"><span><b>{money(order.robux_amount)}</b> total</span><span className={`process-chip ${order.process_type}`}>{order.process_type}</span></div><GamepassLinks order={order} />{order.notes && <p className="record-note">{order.notes}</p>}<div className="record-audit"><span>Added by <b>{staffLabel(order.created_by_email)}</b></span><span>Updated by <b>{staffLabel(order.updated_by_email ?? order.created_by_email)}</b></span></div></article>; }
 
-function PayoutTable({ payouts, loading, onStatus, selected, onToggle, onToggleAll }: { payouts: RobuxPayout[]; loading: boolean; onStatus: (id: string, status: PayoutStatus) => void; selected: Set<string>; onToggle: (id: string) => void; onToggleAll: (ids: string[], checked: boolean) => void }) {
-  const ids = payouts.map(o => o.id);
-  return <><div className="table-card desktop-table"><div className="table-wrap"><table><thead><tr><th className="checkbox-col"><HeaderCheckbox ids={ids} selected={selected} onToggleAll={onToggleAll} /></th><th>Buyer</th><th>Send to</th><th>Robux</th><th>From group</th><th>Status</th><th>Added</th><th>Added by</th><th>Updated by</th></tr></thead><tbody>{loading ? <tr><td colSpan={9}><div className="table-empty">Loading records...</div></td></tr> : payouts.length === 0 ? <tr><td colSpan={9}><Empty title="No Robux payouts" text="Try changing your filters or add a new payout." /></td></tr> : payouts.map(o => <tr key={o.id} className={selected.has(o.id) ? "row-selected" : ""}><td className="checkbox-col"><input type="checkbox" className="row-checkbox" checked={selected.has(o.id)} onChange={() => onToggle(o.id)} aria-label={`Select payout to @${o.roblox_username}`} /></td><td><strong className="table-buyer">@{o.buyer_username}</strong><small className="table-note">{o.buyer_source === "discord" ? "Discord" : "Telegram"}</small>{o.notes && <small className="table-note">{o.notes}</small>}</td><td><strong className="recipient">@{o.roblox_username}</strong><small className="recipient-label">Roblox recipient</small></td><td><strong className="amount">{money(o.robux_amount)}</strong></td><td><span className="group-chip">{o.source_group}</span></td><td><StatusSelect status={o.status} onChange={v => onStatus(o.id, v)} /></td><td className="date-cell">{dateTime(o.created_at)}</td><td className="actor-cell">{staffLabel(o.created_by_email)}</td><td className="actor-cell">{staffLabel(o.updated_by_email ?? o.created_by_email)}</td></tr>)}</tbody></table></div></div><div className="mobile-record-list">{loading ? <div className="mobile-empty">Loading records...</div> : payouts.length === 0 ? <Empty title="No Robux payouts" text="Try changing your filters or add a new payout." /> : payouts.map(o => <PayoutMobileCard key={o.id} payout={o} onStatus={onStatus} selected={selected.has(o.id)} onToggle={() => onToggle(o.id)} />)}</div></>;
+function CopyableText({ text, className = "" }: { text: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  function handleCopy() {
+    navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    });
+  }
+  return (
+    <span className="copyable">
+      <span className={`copyable-text ${className}`}>{text}</span>
+      <button type="button" className={`copy-inline-btn ${copied ? "copied" : ""}`} onClick={handleCopy} title="Copy" aria-label={`Copy ${text}`}>
+        {copied ? <Check size={12} /> : <Copy size={12} />}
+      </button>
+    </span>
+  );
 }
-function PayoutMobileCard({ payout, onStatus, selected, onToggle }: { payout: RobuxPayout; onStatus: (id: string, status: PayoutStatus) => void; selected: boolean; onToggle: () => void }) { return <article className={`record-card ${selected ? "row-selected" : ""}`}><div className="record-card-head"><label className="record-select"><input type="checkbox" className="row-checkbox" checked={selected} onChange={onToggle} aria-label={`Select payout to @${payout.roblox_username}`} /><div><strong>@{payout.buyer_username}</strong><span>{payout.buyer_source === "discord" ? "Discord" : "Telegram"} · {dateTime(payout.created_at)}</span></div></label><StatusSelect status={payout.status} onChange={v => onStatus(payout.id, v)} /></div><div className="recipient-card"><span>Send Robux to</span><strong>@{payout.roblox_username}</strong></div><div className="record-meta"><span><b>{money(payout.robux_amount)}</b></span><span className="group-chip">{payout.source_group}</span></div>{payout.notes && <p className="record-note">{payout.notes}</p>}<div className="record-audit"><span>Added by <b>{staffLabel(payout.created_by_email)}</b></span><span>Updated by <b>{staffLabel(payout.updated_by_email ?? payout.created_by_email)}</b></span></div></article>; }
+
+function GamepassMobileCard({ order, onStatus, onEdit, selected, onToggle }: { order: GamepassOrder; onStatus: (id: string, status: OrderStatus) => void; onEdit: (order: GamepassOrder) => void; selected: boolean; onToggle: () => void }) { return <article className={`record-card ${selected ? "row-selected" : ""}`}><div className="record-card-head"><label className="record-select"><input type="checkbox" className="row-checkbox" checked={selected} onChange={onToggle} aria-label={`Select order from @${order.buyer_username}`} /><div><strong><CopyableText text={`@${order.buyer_username}`} /></strong><span>{order.buyer_source === "discord" ? "Discord" : "Telegram"} · {dateTime(order.created_at)}</span></div></label><div className="row-actions"><StatusSelect status={order.status} onChange={v => onStatus(order.id, v)} /><button className="row-edit" title="Edit order" onClick={() => onEdit(order)}><Pencil size={14} /></button></div></div><div className="record-meta"><span><b>{money(order.robux_amount)}</b> total</span><span className={`process-chip ${order.process_type}`}>{order.process_type}</span></div><GamepassLinks order={order} />{order.notes && <p className="record-note">{order.notes}</p>}<div className="record-audit"><span>Added by <b>{staffLabel(order.created_by_email)}</b></span><span>Updated by <b>{staffLabel(order.updated_by_email ?? order.created_by_email)}</b></span></div></article>; }
+
+function PayoutTable({ payouts, loading, onStatus, onEdit, selected, onToggle, onToggleAll }: { payouts: RobuxPayout[]; loading: boolean; onStatus: (id: string, status: PayoutStatus) => void; onEdit: (payout: RobuxPayout) => void; selected: Set<string>; onToggle: (id: string) => void; onToggleAll: (ids: string[], checked: boolean) => void }) {
+  const ids = payouts.map(o => o.id);
+  return <><div className="table-card desktop-table"><div className="table-wrap"><table><thead><tr><th className="checkbox-col"><HeaderCheckbox ids={ids} selected={selected} onToggleAll={onToggleAll} /></th><th>Buyer</th><th>Send to</th><th>Robux</th><th>From group</th><th>Status</th><th>Added</th><th>Added by</th><th>Updated by</th><th /></tr></thead><tbody>{loading ? <tr><td colSpan={10}><div className="table-empty">Loading records...</div></td></tr> : payouts.length === 0 ? <tr><td colSpan={10}><Empty title="No Robux payouts" text="Try changing your filters or add a new payout." /></td></tr> : payouts.map(o => <tr key={o.id} className={selected.has(o.id) ? "row-selected" : ""}><td className="checkbox-col"><input type="checkbox" className="row-checkbox" checked={selected.has(o.id)} onChange={() => onToggle(o.id)} aria-label={`Select payout to @${o.roblox_username}`} /></td><td><strong className="table-buyer"><CopyableText text={`@${o.buyer_username}`} /></strong><small className="table-note">{o.buyer_source === "discord" ? "Discord" : "Telegram"}</small>{o.notes && <small className="table-note">{o.notes}</small>}</td><td><strong className="recipient"><CopyableText text={`@${o.roblox_username}`} /></strong><small className="recipient-label">Roblox recipient</small></td><td><strong className="amount">{money(o.robux_amount)}</strong></td><td><span className="group-chip">{o.source_group}</span></td><td><StatusSelect status={o.status} onChange={v => onStatus(o.id, v)} /></td><td className="date-cell">{dateTime(o.created_at)}</td><td className="actor-cell">{staffLabel(o.created_by_email)}</td><td className="actor-cell">{staffLabel(o.updated_by_email ?? o.created_by_email)}</td><td><button className="row-edit" title="Edit payout" onClick={() => onEdit(o)}><Pencil size={14} /></button></td></tr>)}</tbody></table></div></div><div className="mobile-record-list">{loading ? <div className="mobile-empty">Loading records...</div> : payouts.length === 0 ? <Empty title="No Robux payouts" text="Try changing your filters or add a new payout." /> : payouts.map(o => <PayoutMobileCard key={o.id} payout={o} onStatus={onStatus} onEdit={onEdit} selected={selected.has(o.id)} onToggle={() => onToggle(o.id)} />)}</div></>;
+}
+function PayoutMobileCard({ payout, onStatus, onEdit, selected, onToggle }: { payout: RobuxPayout; onStatus: (id: string, status: PayoutStatus) => void; onEdit: (payout: RobuxPayout) => void; selected: boolean; onToggle: () => void }) { return <article className={`record-card ${selected ? "row-selected" : ""}`}><div className="record-card-head"><label className="record-select"><input type="checkbox" className="row-checkbox" checked={selected} onChange={onToggle} aria-label={`Select payout to @${payout.roblox_username}`} /><div><strong><CopyableText text={`@${payout.buyer_username}`} /></strong><span>{payout.buyer_source === "discord" ? "Discord" : "Telegram"} · {dateTime(payout.created_at)}</span></div></label><div className="row-actions"><StatusSelect status={payout.status} onChange={v => onStatus(payout.id, v)} /><button className="row-edit" title="Edit payout" onClick={() => onEdit(payout)}><Pencil size={14} /></button></div></div><div className="recipient-card"><span>Send Robux to</span><strong><CopyableText text={`@${payout.roblox_username}`} /></strong></div><div className="record-meta"><span><b>{money(payout.robux_amount)}</b></span><span className="group-chip">{payout.source_group}</span></div>{payout.notes && <p className="record-note">{payout.notes}</p>}<div className="record-audit"><span>Added by <b>{staffLabel(payout.created_by_email)}</b></span><span>Updated by <b>{staffLabel(payout.updated_by_email ?? payout.created_by_email)}</b></span></div></article>; }
 
 function StatusSelect({ status, onChange }: { status: OrderStatus; onChange: (status: OrderStatus) => void }) { return <div className={`status-select ${status}`}><Dropdown value={status} onChange={v => onChange(v as OrderStatus)} options={STATUSES.map(s => ({ value: s, label: statusLabel(s) }))} /></div>; }
 function StatusBadge({ status }: { status: OrderStatus }) { return <span className={`status-badge ${status}`}>{statusLabel(status)}</span>; }
@@ -635,4 +780,62 @@ function SettingsView({ session, role, darkMode, setDarkMode, onRefresh, onSignO
 function Modal({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: ReactNode }) {
   useEffect(() => { const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose(); window.addEventListener("keydown", esc); return () => window.removeEventListener("keydown", esc); }, [onClose]);
   return <div className="modal-backdrop" onMouseDown={e => e.target === e.currentTarget && onClose()}><div className="modal"><div className="modal-head"><div><span className="eyebrow">CREATE RECORD</span><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-btn" type="button" onClick={onClose} aria-label="Close"><X size={17} /></button></div>{children}</div></div>;
+}
+
+function CustomCursor() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dotsRef = useRef<{ el: HTMLDivElement; x: number; y: number; life: number }[]>([]);
+
+  useEffect(() => {
+    if (window.matchMedia("(max-width: 900px)").matches) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    let raf = 0;
+    let lastSpawn = 0;
+
+    const spawn = (x: number, y: number) => {
+      const el = document.createElement("div");
+      el.className = "trail-dot";
+      container.appendChild(el);
+      dotsRef.current.push({ el, x, y, life: 1 });
+      if (dotsRef.current.length > 24) {
+        const old = dotsRef.current.shift();
+        old?.el.remove();
+      }
+    };
+
+    const move = (e: MouseEvent) => {
+      const now = performance.now();
+      if (now - lastSpawn > 22) {
+        lastSpawn = now;
+        spawn(e.clientX, e.clientY);
+      }
+    };
+
+    const animate = () => {
+      dotsRef.current.forEach(d => {
+        d.life -= 0.045;
+        const scale = Math.max(d.life, 0);
+        d.el.style.opacity = String(scale);
+        d.el.style.transform = `translate3d(${d.x}px, ${d.y}px, 0) scale(${scale})`;
+      });
+      dotsRef.current = dotsRef.current.filter(d => {
+        if (d.life <= 0) { d.el.remove(); return false; }
+        return true;
+      });
+      raf = requestAnimationFrame(animate);
+    };
+
+    window.addEventListener("mousemove", move);
+    raf = requestAnimationFrame(animate);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      cancelAnimationFrame(raf);
+      dotsRef.current.forEach(d => d.el.remove());
+      dotsRef.current = [];
+    };
+  }, []);
+
+  return <div ref={containerRef} />;
 }
