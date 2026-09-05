@@ -1,8 +1,9 @@
 {
-  "name": "Chérie Order Desk",
-  "short_name": "Chérie",
-  "description": "Private shared robux order tracker for Chérie.",
+  "name": "Tracker",
+  "short_name": "Tracker",
+  "description": "Private shared Roblox gamepass order tracker.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#f7f7f5",
   "theme_color": "#f7f7f5",
@@ -11,7 +12,7 @@
       "src": "/logo.png",
       "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
     },
     {
       "src": "/logo.png",
